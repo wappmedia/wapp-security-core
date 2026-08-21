@@ -64,6 +64,15 @@ except module.ContractError as error:
 PY
 }
 
+[[ -x "$(recovery_trusted_fixed_python)" ]] || fail trusted_fixed_python
+pass trusted_fixed_python
+runtime_fixture="$TMP/runtime/bin";mkdir -p "$runtime_fixture"
+printf '#!/bin/sh\nexit 0\n' > "$runtime_fixture/python3.12";chmod 777 "$runtime_fixture/python3.12"
+ln -s python3.12 "$runtime_fixture/python3"
+expect_fail writable_symlink_target recovery_trusted_python_candidate "$runtime_fixture/python3"
+rm "$runtime_fixture/python3";ln -s ../outside-python3.12 "$runtime_fixture/python3"
+expect_fail substituted_symlink_target recovery_trusted_python_candidate "$runtime_fixture/python3"
+
 review_private="${WAPP_EMERGENCY_TEST_REVIEW_PRIVATE:?review private key required}"
 make_review(){
   local package="$1" out="$2" payload="$TMP/review-payload" signature="$TMP/review-signature"

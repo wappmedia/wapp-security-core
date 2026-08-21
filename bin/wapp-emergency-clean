@@ -9,8 +9,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODEL="$ROOT/lib/emergency-operator-v1.py"
 source "$ROOT/lib/recovery-integrity.sh"
 fail(){ printf 'emergency-clean: %s\n' "$1" >&2; exit 20; }
-PYTHON=/usr/bin/python3
-[[ -f "$PYTHON" && ! -L "$PYTHON" && -x "$PYTHON" ]] || fail 'canonical Python runtime unavailable'
+PYTHON="$(recovery_trusted_fixed_python)" || fail 'canonical Python runtime unavailable'
 sha(){ recovery_sha256_file "$1"; }
 signed(){ [[ -f "$1" && ! -L "$1" && -f "$1.hmac" && ! -L "$1.hmac" ]] && recovery_verify_file "$1" "$1.hmac" >/dev/null 2>&1; }
 field(){ PYTHONDONTWRITEBYTECODE=1 "$PYTHON" - "$1" "$2" <<'PY'

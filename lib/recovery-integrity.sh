@@ -5,6 +5,56 @@ RECOVERY_INTEGRITY_SERVICE="Wapp Security Recovery Integrity"
 
 recovery_integrity_fail(){ printf 'Fel: %s\n' "$1" >&2; return 1; }
 
+recovery_stat_owner_mode(){
+  local path="$1"
+  if /usr/bin/stat -f '%u %Lp' "$path" >/dev/null 2>&1; then
+    /usr/bin/stat -f '%u %Lp' "$path"
+  else
+    /usr/bin/stat -c '%u %a' "$path"
+  fi
+}
+
+recovery_root_owned_nonwritable(){
+  local identity uid mode permissions
+  identity="$(recovery_stat_owner_mode "$1" 2>/dev/null)" || return 1
+  [[ "$identity" =~ ^[0-9]+\ [0-7]{3,4}$ ]] || return 1
+  uid="${identity%% *}";mode="${identity#* }"
+  [[ "$uid" == 0 ]] || return 1
+  permissions=$((8#$mode))
+  (( (permissions & 8#022) == 0 ))
+}
+
+recovery_trusted_python_candidate(){
+  local requested="$1" parent component link_target resolved link_identity
+  [[ "$requested" == /* && "${requested##*/}" == python3 ]] || return 1
+  parent="${requested%/*}";[[ -n "$parent" ]] || return 1
+  if [[ -L "$requested" ]]; then
+    link_target="$(/usr/bin/readlink "$requested" 2>/dev/null)" || return 1
+    [[ "$link_target" =~ ^python3\.[0-9]+$ ]] || return 1
+    resolved="$parent/$link_target"
+  else
+    resolved="$requested"
+  fi
+  [[ -f "$resolved" && ! -L "$resolved" && -x "$resolved" ]] || return 1
+  recovery_root_owned_nonwritable "$resolved" || return 1
+  if [[ -L "$requested" ]]; then
+    link_identity="$(recovery_stat_owner_mode "$requested" 2>/dev/null)" || return 1
+    [[ "${link_identity%% *}" == 0 ]] || return 1
+  fi
+  component="$parent"
+  while :; do
+    [[ -d "$component" && ! -L "$component" ]] || return 1
+    recovery_root_owned_nonwritable "$component" || return 1
+    [[ "$component" == / ]] && break
+    component="${component%/*}";[[ -n "$component" ]] || component=/
+  done
+  printf '%s' "$resolved"
+}
+
+recovery_trusted_fixed_python(){
+  recovery_trusted_python_candidate /usr/bin/python3
+}
+
 # Lexical path containment for signed recovery/remediation artifacts. Prefix
 # matching alone accepts paths such as /allowed/root/../outside; reject every
 # path that requires normalization before it can be compared to its root.
