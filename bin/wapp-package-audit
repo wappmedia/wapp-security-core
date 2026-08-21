@@ -23,7 +23,7 @@ while IFS= read -r relative || [[ -n "$relative" ]]; do
   [[ -f "$path" && ! -L "$path" ]] || fail "non-regular or symlinked source: $relative"
 done < "$tmp/allowed"
 
-for executable in wapp bin/wapp bin/wapp-closure-check bin/wapp-emergency-clean bin/wapp-package-audit bin/wapp-plugin-policy bin/wapp-product-seal bin/wapp-public-data-boundary bin/wapp-release-check bin/wapp-test tests/test-emergency-operator-v1.sh tests/test-file-manager-for-work-policy.sh tests/test-public-data-boundary.sh; do
+for executable in wapp bin/wapp bin/wapp-closure-check bin/wapp-emergency-clean bin/wapp-package-audit bin/wapp-plugin-policy bin/wapp-product-seal bin/wapp-public-data-boundary bin/wapp-release-check bin/wapp-test tests/test-emergency-operator-v1.sh tests/test-external-reviewer-trust.sh tests/test-file-manager-for-work-policy.sh tests/test-public-data-boundary.sh; do
   [[ -x "$ROOT/$executable" ]] || fail "required executable bit missing: $executable"
 done
 

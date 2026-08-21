@@ -7,13 +7,14 @@ cd "$ROOT"
 /bin/bash -n wapp bin/wapp bin/wapp-closure-check bin/wapp-emergency-clean \
   bin/wapp-package-audit bin/wapp-plugin-policy bin/wapp-product-seal bin/wapp-public-data-boundary \
   bin/wapp-release-check bin/wapp-test lib/recovery-integrity.sh \
-  tests/test-emergency-operator-v1.sh tests/test-file-manager-for-work-policy.sh tests/test-public-data-boundary.sh
+  tests/test-emergency-operator-v1.sh tests/test-external-reviewer-trust.sh tests/test-file-manager-for-work-policy.sh tests/test-public-data-boundary.sh
 python3 - <<'PY'
 from pathlib import Path
 for name in ("lib/emergency-operator-v1.py", "lib/plugin-policy.py", "tests/public-data-boundary.py"):
     compile(Path(name).read_text(encoding="utf-8"), name, "exec")
 PY
 /bin/bash tests/test-emergency-operator-v1.sh
+/bin/bash tests/test-external-reviewer-trust.sh
 /bin/bash tests/test-file-manager-for-work-policy.sh
 /bin/bash tests/test-public-data-boundary.sh
 

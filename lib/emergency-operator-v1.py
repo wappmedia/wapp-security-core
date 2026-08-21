@@ -136,12 +136,113 @@ def canonical_digest(value: Any) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def external_reviewer_trust() -> dict[str, Any] | None:
+    names = {
+        "path": "WAPP_EMERGENCY_REVIEWER_TRUST_ANCHORS_FILE",
+        "sha": "WAPP_EMERGENCY_REVIEWER_TRUST_ANCHORS_SHA256",
+        "reviewer": "WAPP_EMERGENCY_REVIEWER_ID",
+        "key": "WAPP_EMERGENCY_REVIEWER_KEY_ID",
+    }
+    present = {key: name in os.environ for key, name in names.items()}
+    configured = {key: os.environ.get(name, "") for key, name in names.items()}
+    if not any(present.values()):
+        return None
+    if not all(present.values()) or not all(configured.values()):
+        fail("external reviewer trust configuration incomplete")
+    if not HEX64.fullmatch(configured["sha"]):
+        fail("external reviewer trust anchor hash invalid")
+    reviewer_id = string(configured["reviewer"], "external reviewer identity")
+    key_id = string(configured["key"], "external reviewer key identity")
+    path_text = absolute(configured["path"], "external reviewer trust anchor path")
+    if path_text.startswith("//"):
+        fail("external reviewer trust anchor path must be normalized absolute")
+
+    if not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
+        fail("external reviewer trust anchor descriptor protections unavailable")
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    file_flags = os.O_RDONLY | os.O_NOFOLLOW
+    descriptors: list[int] = []
+    try:
+        current = os.open("/", directory_flags)
+        descriptors.append(current)
+        root_info = os.fstat(current)
+        if root_info.st_uid != 0 or root_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            fail("external reviewer trust anchor root is untrusted")
+        parts = Path(path_text).parts[1:]
+        for part in parts[:-1]:
+            child = os.open(part, directory_flags, dir_fd=current)
+            descriptors.append(child)
+            current = child
+            info = os.fstat(current)
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                fail("external reviewer trust anchor parent is untrusted")
+        descriptor = os.open(parts[-1], file_flags, dir_fd=current)
+        descriptors.append(descriptor)
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or before.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            fail("external reviewer trust anchor file is untrusted")
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            block = os.read(descriptor, 65536)
+            if not block:
+                break
+            total += len(block)
+            if total > 65536:
+                fail("external reviewer trust anchor exceeds bounded size")
+            chunks.append(block)
+        after = os.fstat(descriptor)
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+            fail("external reviewer trust anchor descriptor drift")
+        raw = b"".join(chunks)
+    except OSError as error:
+        fail(f"external reviewer trust anchor unavailable: {error}")
+    finally:
+        for descriptor in reversed(descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+    if hashlib.sha256(raw).hexdigest() != configured["sha"]:
+        fail("external reviewer trust anchor hash drift")
+
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in result:
+                raise ValueError(f"duplicate key: {key}")
+            result[key] = item
+        return result
+
+    def reject_constant(constant: str) -> Any:
+        raise ValueError(f"invalid constant: {constant}")
+
+    try:
+        value = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=reject_duplicates,
+            parse_constant=reject_constant,
+        )
+    except (UnicodeError, json.JSONDecodeError, ValueError) as error:
+        fail(f"external reviewer trust anchor invalid JSON: {error}")
+    if not isinstance(value, dict):
+        fail("external reviewer trust anchor root must be an object")
+    reviewers = value.get("reviewers")
+    if not isinstance(reviewers, list) or len(reviewers) != 1:
+        fail("external reviewer trust anchor must pin exactly one reviewer")
+    reviewer = reviewers[0]
+    if not isinstance(reviewer, dict) or reviewer.get("reviewer_id") != reviewer_id or reviewer.get("key_id") != key_id:
+        fail("external reviewer identity/key mismatch")
+    return value
+
+
 def reviewer_trust_anchors() -> dict[tuple[str, str], dict[str, Any]]:
     project_root = Path(__file__).resolve().parent.parent
-    path = project_root / "config/reviewer-trust-anchors.json"
-    value = load(path)
+    value = external_reviewer_trust()
+    if value is None:
+        value = load(project_root / "config/reviewer-trust-anchors.json")
     exact_keys(value, {"tool", "schema", "reviewers"}, "reviewer_trust")
-    if value["tool"] != "wapp-security-reviewer-trust-anchors" or value["schema"] != 1:
+    if value["tool"] != "wapp-security-reviewer-trust-anchors" or type(value["schema"]) is not int or value["schema"] != 1:
         fail("reviewer trust protocol mismatch")
     reviewers = value["reviewers"]
     if not isinstance(reviewers, list):

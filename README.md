@@ -9,8 +9,12 @@ grant canonical production authority.
 
 Independent package reviews require an asymmetric reviewer signature whose
 public key is pinned in the clean Product Seal runtime. The public distribution
-ships with no trusted production reviewer; a private consumer must add and
-review its own public trust anchor before packages can pass.
+ships with no trusted production reviewer. A private consumer may supply one
+explicit reviewer through a separate root-owned, symlink-free, non-writable
+trust-anchor file. The private integration must provide its normalized absolute
+path, exact SHA-256, reviewer identity and versioned key identity through the
+four `WAPP_EMERGENCY_REVIEWER_*` configuration variables. All parent
+directories and the open file descriptor are verified before bytes are used.
 
 ## Commands
 

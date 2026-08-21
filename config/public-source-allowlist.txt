@@ -23,6 +23,7 @@ lib/recovery-integrity.sh
 tests/helpers/recovery-keychain-fixture.sh
 tests/public-data-boundary.py
 tests/test-emergency-operator-v1.sh
+tests/test-external-reviewer-trust.sh
 tests/test-file-manager-for-work-policy.sh
 tests/test-public-data-boundary.sh
 wapp
