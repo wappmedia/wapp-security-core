@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import datetime as dt
 import hashlib
 import json
 import os
@@ -559,7 +560,10 @@ def verify_package(
     *,
     now: int | None = None,
     historical_execution: bool = False,
+    legacy_consumption_identity: Path | None = None,
 ) -> dict[str, Any]:
+    if legacy_consumption_identity is not None and not historical_execution:
+        fail("legacy consumption identity requires explicit historical execution mode")
     value = load(path)
     expected = {
         "tool", "schema", "state", "phase", "contract", "classification", "domain", "operation_id",
@@ -736,7 +740,21 @@ def verify_package(
     package_sha256 = sha(path)
     consumption_identity: Path | None = None
     if historical_execution:
-        consumption_identity = verify_consumption_marker(marker, package_sha256)
+        if legacy_consumption_identity is None:
+            consumption_identity = verify_consumption_marker(marker, package_sha256)
+        else:
+            if legacy_consumption_identity.is_symlink() or not legacy_consumption_identity.is_file():
+                fail("legacy package consumption identity unavailable")
+            identity_state = legacy_consumption_identity.stat()
+            if identity_state.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                fail("legacy package consumption identity is group/world writable")
+            try:
+                identity_raw = legacy_consumption_identity.read_bytes()
+            except OSError as error:
+                fail(f"legacy package consumption identity unreadable: {error}")
+            if identity_raw != (package_sha256 + "\n").encode("ascii"):
+                fail("legacy package consumption identity mismatch")
+            consumption_identity = legacy_consumption_identity
     elif marker.exists() or marker.is_symlink():
         fail("package already consumed or marker collision")
 
@@ -1283,6 +1301,555 @@ def verify_historical_execution_lineage(
     }
 
 
+def bounded_text_lines(path: Path, label: str, *, maximum_bytes: int) -> tuple[bytes, list[str]]:
+    try:
+        raw = path.read_bytes()
+        text = raw.decode("utf-8")
+    except (OSError, UnicodeError) as error:
+        fail(f"{label} is not strict UTF-8: {error}")
+    if not raw or len(raw) > maximum_bytes or not raw.endswith(b"\n") or b"\x00" in raw:
+        fail(f"{label} framing invalid")
+    lines = text.splitlines()
+    if not lines or any(not line for line in lines):
+        fail(f"{label} contains empty or no records")
+    return raw, lines
+
+
+def reconciliation_timestamp(value: str, label: str) -> int:
+    try:
+        parsed = dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+    except ValueError:
+        fail(f"{label} timestamp invalid")
+    return int(parsed.timestamp())
+
+
+def expected_legacy_action_contract(actions: list[dict[str, Any]]) -> dict[str, Any]:
+    quarantine = sum(action["primitive"] == "QUARANTINE_EXACT_FILE" for action in actions)
+    replace = sum(action["primitive"] == "REPLACE_EXACT_FILE" for action in actions)
+    active_actions = [action for action in actions if action["primitive"] == "REMOVE_EXACT_ACTIVE_PLUGIN"]
+    option_rows = sum(action["primitive"] == "REMOVE_EXACT_OPTION" for action in actions)
+    identity_actions = [action for action in actions if action["primitive"] == "QUARANTINE_IDENTITY_ACCESS"]
+    supported = {
+        "QUARANTINE_EXACT_FILE", "REPLACE_EXACT_FILE", "REMOVE_EXACT_ACTIVE_PLUGIN",
+        "REMOVE_EXACT_OPTION", "QUARANTINE_IDENTITY_ACCESS",
+    }
+    if any(action["primitive"] not in supported for action in actions):
+        fail("legacy reconciliation package action is unsupported")
+    active_rows = {
+        (
+            action["target"]["table"],
+            action["target"]["option_id"],
+            action["target"]["option_name"],
+        )
+        for action in active_actions
+    }
+    identity_meta_rows = sum(len(action["target"]["meta_rows"]) for action in identity_actions)
+    return {
+        "actions_sha256": canonical_digest(actions),
+        "quarantine_file_targets": quarantine,
+        "replace_file_targets": replace,
+        "active_plugin_members": len(active_actions),
+        "active_plugin_rows": len(active_rows),
+        "option_rows": option_rows,
+        "identity_targets": len(identity_actions),
+        "identity_meta_rows": identity_meta_rows,
+    }
+
+
+def verify_legacy_reconciled_execution(
+    path: Path,
+    review_path: Path,
+    domain: str,
+    *,
+    now: int | None = None,
+) -> dict[str, Any]:
+    """Verify an explicit, reviewed after-the-fact legacy execution attestation.
+
+    This is deliberately not a fallback from the normal signed historical path.
+    It verifies the original unsigned bytes and a fresh, independently reviewed
+    read-only poststate, and it never grants remediation, reopen, or closure
+    authority.
+    """
+    value = load(path)
+    exact_keys(
+        value,
+        {
+            "tool", "schema", "state", "domain", "root", "root_device", "root_inode",
+            "operation_id", "package_sha256", "generated_at_epoch",
+            "isolation_identity_sha256", "sources", "source_reviewer",
+            "original_execution_audit", "action_contract", "verified_poststate",
+            "statement", "authority",
+        },
+        "legacy_reconciliation",
+    )
+    if (
+        value["tool"] != "wapp-security-emergency-legacy-execution-reconciliation-attestation"
+        or value["schema"] != 1
+        or value["state"] != "LEGACY_RECONCILED_EXECUTION"
+        or value["domain"] != domain
+    ):
+        fail("legacy reconciliation protocol/domain mismatch")
+    root = absolute(value["root"], "legacy_reconciliation.root")
+    root_device = string(value["root_device"], "legacy_reconciliation.root_device")
+    root_inode = string(value["root_inode"], "legacy_reconciliation.root_inode")
+    operation = string(value["operation_id"], "legacy_reconciliation.operation_id")
+    if not HEX32.fullmatch(operation):
+        fail("legacy reconciliation operation identity invalid")
+    package_sha256 = digest(value["package_sha256"], "legacy_reconciliation.package_sha256")
+    generated = integer(value["generated_at_epoch"], "legacy_reconciliation.generated_at_epoch", minimum=1)
+    current_time = int(time.time()) if now is None else now
+    if generated > current_time:
+        fail("legacy reconciliation is future dated")
+    isolation_identity = digest(
+        value["isolation_identity_sha256"],
+        "legacy_reconciliation.isolation_identity_sha256",
+    )
+    if value["statement"] != "AFTER_THE_FACT_VERIFICATION_ORIGINAL_EXECUTION_AUDIT_UNSIGNED":
+        fail("legacy reconciliation statement mismatch")
+    if value["authority"] is not False:
+        fail("legacy reconciliation cannot authorize mutation, reopen, or closure")
+
+    sources = value["sources"]
+    if not isinstance(sources, dict):
+        fail("legacy_reconciliation.sources must be an object")
+    exact_keys(
+        sources,
+        {
+            "package", "package_review", "signed_registry", "consumption_identity",
+            "original_execution_audit", "preserved_execution_audit", "current_poststate",
+            "current_poststate_hmac", "collector", "collector_hmac",
+        },
+        "legacy_reconciliation.sources",
+    )
+    source_paths = {
+        key: bound_file(reference, f"legacy_reconciliation.sources.{key}")
+        for key, reference in sources.items()
+    }
+    package_path = source_paths["package"]
+    package_review_path = source_paths["package_review"]
+    consumption_identity = source_paths["consumption_identity"]
+    package = verify_package(
+        package_path,
+        domain,
+        now=generated,
+        historical_execution=True,
+        legacy_consumption_identity=consumption_identity,
+    )
+    package_review = verify_review(package_review_path, package_path)
+    if (
+        package["package_sha256"] != package_sha256
+        or package["operation_id"] != operation
+        or package["root"] != root
+    ):
+        fail("legacy reconciliation remediation package binding mismatch")
+    package_value = load(package_path)
+    if (
+        package_value["site"]["root_device"] != root_device
+        or package_value["site"]["root_inode"] != root_inode
+    ):
+        fail("legacy reconciliation site identity mismatch")
+    expected_isolation = canonical_digest({
+        "site": package_value["site"],
+        "isolation": package_value["isolation"],
+    })
+    if isolation_identity != expected_isolation:
+        fail("legacy reconciliation isolation identity mismatch")
+    action_contract = value["action_contract"]
+    if not isinstance(action_contract, dict):
+        fail("legacy_reconciliation.action_contract must be an object")
+    expected_actions = expected_legacy_action_contract(package["actions"])
+    exact_keys(action_contract, set(expected_actions), "legacy_reconciliation.action_contract")
+    for key, expected in expected_actions.items():
+        if key == "actions_sha256":
+            observed: Any = digest(action_contract[key], f"legacy action contract {key}")
+        else:
+            observed = integer(action_contract[key], f"legacy action contract {key}")
+        if observed != expected:
+            fail("legacy reconciliation action contract mismatch")
+
+    registry = load(source_paths["signed_registry"])
+    exact_keys(registry, {"tool", "schema", "domain", "remediation", "reopen", "closure"}, "legacy signed registry")
+    if (
+        registry["tool"] != "wapp-security-emergency-operator-registry"
+        or registry["schema"] != 1
+        or registry["domain"] != domain
+        or registry["remediation"] != {
+            "package": sources["package"],
+            "review": sources["package_review"],
+        }
+    ):
+        fail("legacy signed registry/remediation binding mismatch")
+
+    source_reviewer = value["source_reviewer"]
+    if not isinstance(source_reviewer, dict):
+        fail("legacy_reconciliation.source_reviewer must be an object")
+    exact_keys(
+        source_reviewer,
+        {"reviewer_id", "key_id", "signature_algorithm", "package_review_sha256"},
+        "legacy_reconciliation.source_reviewer",
+    )
+    if (
+        source_reviewer["reviewer_id"] != package_review["reviewer_id"]
+        or source_reviewer["key_id"] != package_review["key_id"]
+        or source_reviewer["signature_algorithm"] != package_review["signature_algorithm"]
+        or digest(source_reviewer["package_review_sha256"], "legacy source review sha256") != sha(package_review_path)
+    ):
+        fail("legacy reconciliation source reviewer binding mismatch")
+
+    original = value["original_execution_audit"]
+    if not isinstance(original, dict):
+        fail("legacy_reconciliation.original_execution_audit must be an object")
+    exact_keys(
+        original,
+        {
+            "sha256", "bytes", "device", "inode", "uid", "gid", "mode", "mtime_epoch",
+            "signed_at_execution", "hmac_present_at_execution",
+        },
+        "legacy_reconciliation.original_execution_audit",
+    )
+    original_path = source_paths["original_execution_audit"]
+    preserved_path = source_paths["preserved_execution_audit"]
+    original_sha = digest(original["sha256"], "legacy original audit sha256")
+    if (
+        original_sha != sources["original_execution_audit"]["sha256"]
+        or original_sha != sources["preserved_execution_audit"]["sha256"]
+    ):
+        fail("legacy original/preserved audit byte identity mismatch")
+    original_raw, audit_lines = bounded_text_lines(original_path, "legacy original execution audit", maximum_bytes=4 * 1024 * 1024)
+    preserved_raw, _ = bounded_text_lines(preserved_path, "legacy preserved execution audit", maximum_bytes=4 * 1024 * 1024)
+    original_state = original_path.stat()
+    if (
+        original_raw != preserved_raw
+        or integer(original["bytes"], "legacy original audit bytes", minimum=1) != len(original_raw)
+        or string(original["device"], "legacy original audit device") != str(original_state.st_dev)
+        or string(original["inode"], "legacy original audit inode") != str(original_state.st_ino)
+        or integer(original["uid"], "legacy original audit uid") != original_state.st_uid
+        or integer(original["gid"], "legacy original audit gid") != original_state.st_gid
+        or string(original["mode"], "legacy original audit mode") != format(stat.S_IMODE(original_state.st_mode), "04o")
+        or integer(original["mtime_epoch"], "legacy original audit mtime") != int(original_state.st_mtime)
+        or boolean(original["signed_at_execution"], "legacy original audit signed_at_execution") is not False
+        or boolean(original["hmac_present_at_execution"], "legacy original audit hmac_present_at_execution") is not False
+    ):
+        fail("legacy original execution audit metadata/status mismatch")
+    for candidate in (original_path, preserved_path):
+        hmac_path = Path(str(candidate) + ".hmac")
+        if hmac_path.exists() or hmac_path.is_symlink():
+            fail("legacy unsigned execution audit unexpectedly has HMAC")
+    begin = re.compile(
+        r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\tBEGIN contract=[A-Z0-9_]+"
+        + r" site=" + re.escape(domain)
+        + r" operation=" + re.escape(operation)
+        + r" package=" + re.escape(package_sha256)
+        + r" operator=[A-Za-z0-9._-]+$"
+    )
+    terminal = re.compile(
+        r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\t"
+        r"[A-Z0-9_]+_REMEDIATION_COMPLETE_ISOLATION_REMAINS_ACTIVE$"
+    )
+    begin_records = [(index, line) for index, line in enumerate(audit_lines) if begin.fullmatch(line)]
+    terminal_records = [(index, line) for index, line in enumerate(audit_lines) if terminal.fullmatch(line)]
+    audit_apply = (
+        f"WAPP_[A-Z0-9_]+_DB_APPLY_V1\\|{re.escape(operation)}\\|COMMITTED"
+        f"\\|active={expected_actions['active_plugin_rows']}"
+        f"\\|options={expected_actions['option_rows']}"
+        f"\\|identity={expected_actions['identity_meta_rows']}"
+        f"\\|credential_neutral={1 if expected_actions['identity_targets'] else 0}"
+        r"\|sessions_restored=0"
+    )
+    audit_after = (
+        f"WAPP_[A-Z0-9_]+_DB_AFTER_V1\\|{re.escape(operation)}\\|EXACT"
+        f"\\|active={expected_actions['active_plugin_rows']}"
+        r"\|options=0\|identity=0"
+        f"\\|user_preserved={1 if expected_actions['identity_targets'] else 0}"
+        r"\|sessions=0"
+    )
+    audit_apply_records = [
+        (index, line) for index, line in enumerate(audit_lines)
+        if re.fullmatch(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\t" + audit_apply + r"$", line)
+    ]
+    audit_database_records = [
+        (index, line) for index, line in enumerate(audit_lines)
+        if re.fullmatch(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\t" + audit_after + r"$", line)
+    ]
+    quarantine_records = [
+        (index, line) for index, line in enumerate(audit_lines)
+        if re.fullmatch(
+            r"WAPP_[A-Z0-9_]+_FILES_QUARANTINED_V1\|" + re.escape(operation)
+            + r"\|" + str(expected_actions["quarantine_file_targets"]),
+            line,
+        )
+    ]
+    replace_records = [
+        (index, line) for index, line in enumerate(audit_lines)
+        if re.fullmatch(
+            r"WAPP_[A-Z0-9_]+_FILES_TRANSFORMED_V1\|" + re.escape(operation)
+            + r"\|" + str(expected_actions["replace_file_targets"]),
+            line,
+        )
+    ]
+    file_markers_ok = (
+        (expected_actions["quarantine_file_targets"] == 0 and not quarantine_records)
+        or (expected_actions["quarantine_file_targets"] > 0 and len(quarantine_records) == 1)
+    ) and (
+        (expected_actions["replace_file_targets"] == 0 and not replace_records)
+        or (expected_actions["replace_file_targets"] > 0 and len(replace_records) == 1)
+    )
+    database_expected = any(
+        expected_actions[key] > 0
+        for key in ("active_plugin_members", "option_rows", "identity_targets")
+    )
+    database_markers_ok = (
+        (not database_expected and not audit_apply_records and not audit_database_records)
+        or (database_expected and len(audit_apply_records) == 1 and len(audit_database_records) == 1)
+    )
+    generic_quarantine = [line for line in audit_lines if re.fullmatch(r"WAPP_[A-Z0-9_]+_FILES_QUARANTINED_V1\|" + re.escape(operation) + r"\|[0-9]+", line)]
+    generic_replace = [line for line in audit_lines if re.fullmatch(r"WAPP_[A-Z0-9_]+_FILES_TRANSFORMED_V1\|" + re.escape(operation) + r"\|[0-9]+", line)]
+    generic_apply = [line for line in audit_lines if re.fullmatch(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\tWAPP_[A-Z0-9_]+_DB_APPLY_V1\|" + re.escape(operation) + r"\|.+$", line)]
+    generic_after = [line for line in audit_lines if re.fullmatch(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\tWAPP_[A-Z0-9_]+_DB_AFTER_V1\|" + re.escape(operation) + r"\|.+$", line)]
+    if (
+        len(begin_records) != 1
+        or len(terminal_records) != 1
+        or not file_markers_ok
+        or not database_markers_ok
+        or len(generic_quarantine) != len(quarantine_records)
+        or len(generic_replace) != len(replace_records)
+        or len(generic_apply) != len(audit_apply_records)
+        or len(generic_after) != len(audit_database_records)
+    ):
+        fail("legacy original execution audit success/site binding unavailable")
+    begin_index, begin_line = begin_records[0]
+    terminal_index, terminal_line = terminal_records[0]
+    file_indices = [index for index, _ in (*quarantine_records, *replace_records)]
+    if database_expected:
+        apply_index, apply_line = audit_apply_records[0]
+        after_index, after_line = audit_database_records[0]
+        if not (
+            begin_index < min(file_indices, default=apply_index)
+            and max(file_indices, default=begin_index) < apply_index < after_index < terminal_index
+        ):
+            fail("legacy original execution audit marker order invalid")
+    elif not (begin_index < min(file_indices, default=terminal_index) and max(file_indices, default=begin_index) < terminal_index):
+        fail("legacy original execution audit marker order invalid")
+    audit_started = reconciliation_timestamp(begin_line.split("\t", 1)[0], "legacy audit start")
+    audit_completed = reconciliation_timestamp(terminal_line.split("\t", 1)[0], "legacy audit completion")
+    if database_expected:
+        apply_at = reconciliation_timestamp(apply_line.split("\t", 1)[0], "legacy database apply")
+        after_at = reconciliation_timestamp(after_line.split("\t", 1)[0], "legacy database after")
+        if not audit_started <= apply_at <= after_at <= audit_completed:
+            fail("legacy original execution audit database chronology invalid")
+    if not (
+        package["generated_at_epoch"] <= audit_started <= audit_completed
+        < package["expires_at_epoch"] <= generated <= current_time
+    ):
+        fail("legacy original execution audit chronology invalid")
+    identity_user_ids = sorted({
+        action["target"]["user_id"]
+        for action in package["actions"]
+        if action["primitive"] == "QUARANTINE_IDENTITY_ACCESS"
+    })
+    if len(identity_user_ids) > 1:
+        fail("legacy reconciliation multiple identity targets unsupported")
+    audit_pre = (
+        f"WAPP_[A-Z0-9_]+_DB_PRE_V1\\|{re.escape(operation)}\\|EXACT"
+        f"\\|active={expected_actions['active_plugin_rows']}"
+        f"\\|options={expected_actions['option_rows']}"
+        f"\\|identity={expected_actions['identity_meta_rows']}"
+        r"\|session=0"
+        f"\\|user={identity_user_ids[0] if identity_user_ids else 0}"
+    )
+    allowed_timestamped = [
+        begin,
+        terminal,
+        re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\tOPEN endpoint=(?:public|origin) route=\S+ frame=[0-9]{3}\|\|[0-9]+$"),
+        re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\tPUBLIC_CORE_HUMAN_GATE_ALREADY_VERIFIED$"),
+        re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\tSELF_MANAGED_ATOMIC_DOCROOT_ISOLATION_ACTIVE$"),
+        re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\tISOLATION endpoint=(?:public|origin) scheme=(?:http|https) route=\S+ denied=1$"),
+        re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\tISOLATION_PREWRITE observation=[0-9]+$"),
+        re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\tRECURRENCE_AFTER_EXECUTABLE observation=[0-9]+$"),
+        re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\tEXECUTABLES_QUARANTINED files=" + str(expected_actions["quarantine_file_targets"]) + r"$"),
+        re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\t" + audit_pre + r"$"),
+        re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\t" + audit_apply + r"$"),
+        re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\t" + audit_after + r"$"),
+    ]
+    file_total = expected_actions["quarantine_file_targets"] + expected_actions["replace_file_targets"]
+    allowed_untimestamped = [
+        re.compile(r"^WAPP_[A-Z0-9_]+_ISOLATION_OBSERVED_OPEN_V1\|" + re.escape(operation) + r"$"),
+        re.compile(r"^WAPP_[A-Z0-9_]+_ISOLATION_PREPARED_V1\|" + re.escape(operation) + r"$"),
+        re.compile(r"^WAPP_[A-Z0-9_]+_ISOLATION_ACTIVE_V1\|" + re.escape(operation) + r"\|root_inode=" + re.escape(root_inode) + r"$"),
+        re.compile(r"^WAPP_[A-Z0-9_]+_FILES_OBSERVED_ISOLATED_V1\|" + re.escape(operation) + r"\|" + str(file_total) + r"$"),
+        re.compile(r"^WAPP_[A-Z0-9_]+_FILES_PREPARED_V1\|" + re.escape(operation) + r"\|" + str(file_total) + r"$"),
+        re.compile(r"^WAPP_[A-Z0-9_]+_FILES_OBSERVED_PREWRITE_V1\|" + re.escape(operation) + r"\|" + str(file_total) + r"$"),
+        re.compile(r"^WAPP_[A-Z0-9_]+_FILES_VERIFIED_V1\|" + re.escape(operation) + r"\|" + str(file_total) + r"$"),
+        re.compile(r"^WAPP_[A-Z0-9_]+_FILES_QUARANTINED_V1\|" + re.escape(operation) + r"\|" + str(expected_actions["quarantine_file_targets"]) + r"$"),
+        re.compile(r"^WAPP_[A-Z0-9_]+_FILES_TRANSFORMED_V1\|" + re.escape(operation) + r"\|" + str(expected_actions["replace_file_targets"]) + r"$"),
+    ]
+    timestamp_prefix = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)\t")
+    for index, line in enumerate(audit_lines):
+        timestamp_match = timestamp_prefix.match(line)
+        if timestamp_match:
+            if not any(pattern.fullmatch(line) for pattern in allowed_timestamped):
+                fail("legacy original execution audit contains unknown timestamped record")
+            line_epoch = reconciliation_timestamp(timestamp_match.group(1), "legacy audit record")
+            if index < begin_index or index > terminal_index or not package["generated_at_epoch"] <= line_epoch <= audit_completed:
+                fail("legacy original execution audit record chronology invalid")
+        elif not any(pattern.fullmatch(line) for pattern in allowed_untimestamped):
+            fail("legacy original execution audit contains unknown untimestamped record")
+
+    _, poststate_lines = bounded_text_lines(
+        source_paths["current_poststate"],
+        "legacy reconciliation current poststate",
+        maximum_bytes=1024 * 1024,
+    )
+    if not re.fullmatch(r"WAPP_[A-Z0-9_]+_LEGACY_RECONCILIATION_CURRENT_POSTSTATE_V1", poststate_lines[0]):
+        fail("legacy reconciliation poststate protocol mismatch")
+    expected_fields = {
+        "domain": domain,
+        "root": root,
+        "root_device": root_device,
+        "root_inode": root_inode,
+        "operation_id": operation,
+        "package_sha256": package_sha256,
+        "original_audit_sha256": original_sha,
+        "original_audit_signed_at_execution": "false",
+        "read_only": "true",
+        "authority": "false",
+    }
+    observed_fields: dict[str, str] = {}
+    for line in poststate_lines[1:11]:
+        if line.count("=") != 1:
+            fail("legacy reconciliation poststate binding malformed")
+        key, item = line.split("=", 1)
+        if key in observed_fields:
+            fail("legacy reconciliation poststate binding duplicated")
+        observed_fields[key] = item
+    if observed_fields != expected_fields:
+        fail("legacy reconciliation poststate binding mismatch")
+    cursor = 11
+    begin_times: list[int] = []
+    end_times: list[int] = []
+    expected_file_total = expected_actions["quarantine_file_targets"] + expected_actions["replace_file_targets"]
+    poststate_after = re.compile(audit_after)
+    for observation_index in (0, 1):
+        if cursor >= len(poststate_lines):
+            fail("legacy reconciliation observation missing")
+        begin_match = re.fullmatch(
+            r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)\tOBSERVATION_BEGIN index="
+            + str(observation_index),
+            poststate_lines[cursor],
+        )
+        if begin_match is None:
+            fail("legacy reconciliation observation order mismatch")
+        begin_times.append(reconciliation_timestamp(begin_match.group(1), "legacy observation"))
+        cursor += 1
+        evidence = poststate_lines[cursor:]
+        end_offset = next(
+            (
+                offset for offset, line in enumerate(evidence)
+                if re.fullmatch(
+                    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\tOBSERVATION_END index="
+                    + str(observation_index),
+                    line,
+                )
+            ),
+            None,
+        )
+        if end_offset is None:
+            fail("legacy reconciliation observation end missing")
+        block = evidence[:end_offset]
+        end_line = evidence[end_offset]
+        end_at = reconciliation_timestamp(end_line.split("\t", 1)[0], "legacy observation end")
+        if end_at < begin_times[-1]:
+            fail("legacy reconciliation observation chronology invalid")
+        if any("OBSERVATION_" in line for line in block):
+            fail("legacy reconciliation observation nesting invalid")
+        isolation_count = sum(bool(re.fullmatch(r"WAPP_[A-Z0-9_]+_ISOLATION_VERIFIED_V1\|" + re.escape(operation), line)) for line in block)
+        file_count = sum(bool(re.fullmatch(r"WAPP_[A-Z0-9_]+_FILES_VERIFIED_V1\|" + re.escape(operation) + r"\|" + str(expected_file_total), line)) for line in block)
+        database_count = sum(bool(poststate_after.fullmatch(line)) for line in block)
+        public_records = [line for line in block if re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\tHTTP_ISOLATION endpoint=public route=\S+ denied=1", line)]
+        origin_records = [line for line in block if re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\tHTTP_ISOLATION endpoint=origin route=\S+ denied=1", line)]
+        public_denied = len(public_records)
+        origin_denied = len(origin_records)
+        for denial in (*public_records, *origin_records):
+            denial_at = reconciliation_timestamp(denial.split("\t", 1)[0], "legacy isolation evidence")
+            if not begin_times[-1] <= denial_at <= end_at:
+                fail("legacy reconciliation isolation evidence chronology invalid")
+        recognized = isolation_count + file_count + database_count + public_denied + origin_denied
+        if (
+            isolation_count != 1
+            or file_count != 1
+            or database_count != (1 if database_expected else 0)
+            or public_denied < 1
+            or origin_denied < 1
+            or recognized != len(block)
+        ):
+            fail("legacy reconciliation observation proof incomplete")
+        end_times.append(end_at)
+        cursor += end_offset + 1
+    terminal_poststate = "RECONCILIATION_POSTSTATE_VERIFIED recurrence=false isolation_active=true"
+    if cursor != len(poststate_lines) - 1 or not poststate_lines[cursor].endswith("\t" + terminal_poststate):
+        fail("legacy reconciliation exact poststate proof incomplete")
+    if (
+        begin_times[0] < package["expires_at_epoch"]
+        or end_times[0] >= begin_times[1]
+        or begin_times[1] - begin_times[0] < 60
+    ):
+        fail("legacy reconciliation bounded stability window incomplete")
+    poststate_completed = reconciliation_timestamp(
+        poststate_lines[cursor].split("\t", 1)[0],
+        "legacy reconciliation completion",
+    )
+    if poststate_completed < end_times[1] or poststate_completed > generated:
+        fail("legacy reconciliation poststate chronology invalid")
+
+    verified = value["verified_poststate"]
+    if not isinstance(verified, dict):
+        fail("legacy_reconciliation.verified_poststate must be an object")
+    exact_keys(
+        verified,
+        {
+            "quarantine_exact", "active_plugins_exact", "incident_options_absent",
+            "incident_identity_access_quarantined", "recurrence", "isolation_active",
+            "site_identity_verified", "read_only",
+        },
+        "legacy_reconciliation.verified_poststate",
+    )
+    expected_verified = {
+        "quarantine_exact": True,
+        "active_plugins_exact": True,
+        "incident_options_absent": True,
+        "incident_identity_access_quarantined": True,
+        "recurrence": False,
+        "isolation_active": True,
+        "site_identity_verified": True,
+        "read_only": True,
+    }
+    for key in expected_verified:
+        boolean(verified[key], f"legacy_reconciliation.verified_poststate.{key}")
+    if verified != expected_verified:
+        fail("legacy reconciliation verified poststate is incomplete")
+
+    reconciliation_review = verify_review(review_path, path)
+    return {
+        "state": "LEGACY_RECONCILED_EXECUTION",
+        "domain": domain,
+        "root": root,
+        "root_device": root_device,
+        "root_inode": root_inode,
+        "operation_id": operation,
+        "package_sha256": package_sha256,
+        "isolation_identity_sha256": isolation_identity,
+        "generated_at_epoch": generated,
+        "original_audit_sha256": original_sha,
+        "original_audit_signed_at_execution": False,
+        "reconciliation_reviewer_id": reconciliation_review["reviewer_id"],
+        "reconciliation_reviewer_key_id": reconciliation_review["key_id"],
+        "isolation_active": True,
+        "recurrence": False,
+        "authority": False,
+        "dependencies": [str(path), str(review_path), *[str(item) for item in source_paths.values()]],
+    }
+
+
 def verify_current_site_identity(
     path: Path,
     domain: str,
@@ -1560,6 +2127,11 @@ def main() -> int:
     review_parser.add_argument("--review", required=True)
     review_parser.add_argument("--package", required=True)
     review_parser.add_argument("--domain", required=True)
+    legacy_parser = sub.add_parser("verify-legacy-reconciliation")
+    legacy_parser.add_argument("--attestation", required=True)
+    legacy_parser.add_argument("--review", required=True)
+    legacy_parser.add_argument("--domain", required=True)
+    legacy_parser.add_argument("--now-epoch", type=int)
     exec_parser = sub.add_parser("exec-launcher")
     exec_parser.add_argument("--launcher", required=True)
     exec_parser.add_argument("--sha256", required=True)
@@ -1580,6 +2152,17 @@ def main() -> int:
             verify_package(Path(args.package), domain)
             verify_review(Path(args.review), Path(args.package))
             print("PASS_NO_P0_P1_P2")
+        elif args.command == "verify-legacy-reconciliation":
+            print(json.dumps(
+                verify_legacy_reconciled_execution(
+                    Path(args.attestation),
+                    Path(args.review),
+                    domain,
+                    now=args.now_epoch,
+                ),
+                sort_keys=True,
+                separators=(",", ":"),
+            ))
         else:
             print(json.dumps(verify_closure(Path(args.record), domain, now=args.now_epoch), sort_keys=True, separators=(",", ":")))
     except ContractError as error:

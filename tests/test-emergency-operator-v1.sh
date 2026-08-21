@@ -457,4 +457,106 @@ replay_probe="$run/closure-replay-probe";rm -f "$replay_probe"
 WAPP_TEST_CLOSURE_REPLAY_PROBE="$replay_probe" python3 "$MODEL" verify-closure --record "$historical_closure" --domain "$domain" --now-epoch "$history_now" >/dev/null
 [[ ! -e "$replay_probe" && -d "$run/consumed" && -d "$run/historical-reopen-consumed" ]] || fail historical_closure_replayed_mutation
 pass historical_closure_no_replay_authority
+
+# A legacy audit that was genuinely executed but unsigned at execution time is
+# accepted only through the explicit, independently reviewed reconciliation
+# protocol.  The normal historical path must remain strict and never fall back.
+legacy_consumption="$run/legacy-operation/package-sha256";mkdir -m 700 "$run/legacy-operation"
+printf '%s\n' "$package_sha" >"$legacy_consumption";chmod 600 "$legacy_consumption"
+legacy_audit="$run/legacy-unsigned-execution-audit.log"
+python3 - "$package" "$legacy_audit" <<'PY'
+import datetime,json,sys
+package,out=sys.argv[1:];p=json.load(open(package));op=p['operation_id'];sha=__import__('hashlib').sha256(open(package,'rb').read()).hexdigest();start=p['generated_at_epoch']+10
+stamp=lambda value:datetime.datetime.fromtimestamp(value,datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+lines=[f'{stamp(start)}\tBEGIN contract=HUMAN_OPERATOR_EMERGENCY_YELLOW_SELF_MANAGED_ISOLATION site={p["domain"]} operation={op} package={sha} operator=synthetic-operator',f'WAPP_SYNTHETIC_FILES_QUARANTINED_V1|{op}|1',f'WAPP_SYNTHETIC_FILES_TRANSFORMED_V1|{op}|1',f'{stamp(start+1)}\tWAPP_SYNTHETIC_DB_APPLY_V1|{op}|COMMITTED|active=1|options=1|identity=4|credential_neutral=1|sessions_restored=0',f'{stamp(start+2)}\tWAPP_SYNTHETIC_DB_AFTER_V1|{op}|EXACT|active=1|options=0|identity=0|user_preserved=1|sessions=0',f'{stamp(start+3)}\tWAPP_SYNTHETIC_REMEDIATION_COMPLETE_ISOLATION_REMAINS_ACTIVE']
+open(out,'w').write('\n'.join(lines)+'\n')
+PY
+chmod 600 "$legacy_audit";legacy_preserved="$run/legacy-preserved-execution-audit.log";cp "$legacy_audit" "$legacy_preserved";chmod 600 "$legacy_preserved"
+legacy_collector="$run/legacy-readonly-collector";printf '#!/bin/sh\nexit 20\n' >"$legacy_collector";chmod 600 "$legacy_collector";sign "$legacy_collector"
+legacy_poststate="$run/legacy-current-poststate.log"
+python3 - "$package" "$legacy_audit" "$legacy_poststate" <<'PY'
+import datetime,hashlib,json,sys
+package,audit,out=sys.argv[1:];p=json.load(open(package));op=p['operation_id'];sha=hashlib.sha256(open(package,'rb').read()).hexdigest();start=p['expires_at_epoch']+10
+stamp=lambda value:datetime.datetime.fromtimestamp(value,datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+lines=['WAPP_SYNTHETIC_LEGACY_RECONCILIATION_CURRENT_POSTSTATE_V1',f'domain={p["domain"]}',f'root={p["site"]["root"]}',f'root_device={p["site"]["root_device"]}',f'root_inode={p["site"]["root_inode"]}',f'operation_id={op}',f'package_sha256={sha}',f'original_audit_sha256={hashlib.sha256(open(audit,"rb").read()).hexdigest()}','original_audit_signed_at_execution=false','read_only=true','authority=false']
+for index,when in enumerate((start,start+60)):
+ lines.extend([f'{stamp(when)}\tOBSERVATION_BEGIN index={index}',f'WAPP_SYNTHETIC_ISOLATION_VERIFIED_V1|{op}',f'WAPP_SYNTHETIC_FILES_VERIFIED_V1|{op}|2',f'WAPP_SYNTHETIC_DB_AFTER_V1|{op}|EXACT|active=1|options=0|identity=0|user_preserved=1|sessions=0',f'{stamp(when+1)}\tHTTP_ISOLATION endpoint=public route=/ denied=1',f'{stamp(when+1)}\tHTTP_ISOLATION endpoint=origin route=/ denied=1',f'{stamp(when+2)}\tOBSERVATION_END index={index}'])
+lines.append(f'{stamp(start+62)}\tRECONCILIATION_POSTSTATE_VERIFIED recurrence=false isolation_active=true')
+open(out,'w').write('\n'.join(lines)+'\n')
+PY
+chmod 600 "$legacy_poststate";sign "$legacy_poststate"
+legacy_attestation="$run/legacy-reconciliation.json";legacy_review="$run/legacy-reconciliation-review.json"
+python3 - "$legacy_attestation" "$package" "$review" "$registry" "$legacy_consumption" "$legacy_audit" "$legacy_preserved" "$legacy_poststate" "$legacy_collector" "$domain" "$history_now" <<'PY'
+import hashlib,json,os,stat,sys
+out,package,review,registry,consumption,audit,preserved,poststate,collector,domain,now=sys.argv[1:]
+def ref(path):return {'path':path,'sha256':hashlib.sha256(open(path,'rb').read()).hexdigest()}
+p=json.load(open(package));r=json.load(open(review));s=os.stat(audit);actions=p['actions'];active=[a for a in actions if a['primitive']=='REMOVE_EXACT_ACTIVE_PLUGIN'];identity=[a for a in actions if a['primitive']=='QUARANTINE_IDENTITY_ACCESS']
+isolation=hashlib.sha256(json.dumps({'site':p['site'],'isolation':p['isolation']},sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()
+action_contract={'actions_sha256':hashlib.sha256(json.dumps(actions,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest(),'quarantine_file_targets':sum(a['primitive']=='QUARANTINE_EXACT_FILE' for a in actions),'replace_file_targets':sum(a['primitive']=='REPLACE_EXACT_FILE' for a in actions),'active_plugin_members':len(active),'active_plugin_rows':len({(a['target']['table'],a['target']['option_id'],a['target']['option_name']) for a in active}),'option_rows':sum(a['primitive']=='REMOVE_EXACT_OPTION' for a in actions),'identity_targets':len(identity),'identity_meta_rows':sum(len(a['target']['meta_rows']) for a in identity)}
+value={'tool':'wapp-security-emergency-legacy-execution-reconciliation-attestation','schema':1,'state':'LEGACY_RECONCILED_EXECUTION','domain':domain,'root':p['site']['root'],'root_device':p['site']['root_device'],'root_inode':p['site']['root_inode'],'operation_id':p['operation_id'],'package_sha256':ref(package)['sha256'],'generated_at_epoch':int(now),'isolation_identity_sha256':isolation,'sources':{'package':ref(package),'package_review':ref(review),'signed_registry':ref(registry),'consumption_identity':ref(consumption),'original_execution_audit':ref(audit),'preserved_execution_audit':ref(preserved),'current_poststate':ref(poststate),'current_poststate_hmac':ref(poststate+'.hmac'),'collector':ref(collector),'collector_hmac':ref(collector+'.hmac')},'source_reviewer':{'reviewer_id':r['reviewer_id'],'key_id':r['key_id'],'signature_algorithm':r['signature_algorithm'],'package_review_sha256':ref(review)['sha256']},'original_execution_audit':{'sha256':ref(audit)['sha256'],'bytes':s.st_size,'device':str(s.st_dev),'inode':str(s.st_ino),'uid':s.st_uid,'gid':s.st_gid,'mode':format(stat.S_IMODE(s.st_mode),'04o'),'mtime_epoch':int(s.st_mtime),'signed_at_execution':False,'hmac_present_at_execution':False},'action_contract':action_contract,'verified_poststate':{'quarantine_exact':True,'active_plugins_exact':True,'incident_options_absent':True,'incident_identity_access_quarantined':True,'recurrence':False,'isolation_active':True,'site_identity_verified':True,'read_only':True},'statement':'AFTER_THE_FACT_VERIFICATION_ORIGINAL_EXECUTION_AUDIT_UNSIGNED','authority':False}
+open(out,'w').write(json.dumps(value,sort_keys=True,separators=(',',':'))+'\n')
+PY
+chmod 600 "$legacy_attestation";sign "$legacy_attestation";make_review "$legacy_attestation" "$legacy_review"
+mv "$run/consumed" "$run/consumed.legacy-test"
+python3 "$MODEL" verify-legacy-reconciliation --attestation "$legacy_attestation" --review "$legacy_review" --domain "$domain" --now-epoch "$history_now" | grep -Fq '"state":"LEGACY_RECONCILED_EXECUTION"' || fail legacy_reconciled_execution
+expect_fail legacy_no_silent_normal_fallback python3 - "$MODEL" "$package" "$domain" "$history_now" <<'PY'
+import importlib.util,pathlib,sys
+model,package,domain,now=sys.argv[1:];spec=importlib.util.spec_from_file_location('m',model);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+m.verify_package(pathlib.Path(package),domain,now=int(now),historical_execution=True)
+PY
+mv "$run/consumed.legacy-test" "$run/consumed"
+legacy_variant(){
+  local name="$1" code="$2" out="$run/legacy-$name.json" out_review="$run/legacy-$name-review.json"
+  python3 - "$legacy_attestation" "$out" "$code" <<'PY'
+import json,sys
+source,out,code=sys.argv[1:];value=json.load(open(source));exec(code);open(out,'w').write(json.dumps(value,sort_keys=True,separators=(',',':'))+'\n')
+PY
+  chmod 600 "$out";sign "$out";make_review "$out" "$out_review"
+  expect_fail "legacy_$name" python3 "$MODEL" verify-legacy-reconciliation --attestation "$out" --review "$out_review" --domain "$domain" --now-epoch "$history_now"
+}
+legacy_variant wrong_package_sha "value['package_sha256']='9'*64"
+legacy_variant wrong_operation "value['operation_id']='d'*32"
+legacy_variant missing_audit "del value['sources']['original_execution_audit']"
+legacy_variant missing_poststate "del value['sources']['current_poststate']"
+legacy_variant unverifiable_poststate "value['verified_poststate']['recurrence']=True"
+legacy_variant authority "value['authority']=True"
+legacy_variant action_contract_drift "value['action_contract']['identity_meta_rows']+=1"
+legacy_variant reconciliation_before_expiry "value['generated_at_epoch']=json.load(open(value['sources']['package']['path']))['expires_at_epoch']-1"
+legacy_chronology_variant(){
+  local name="$1" audit_code="$2" poststate_code="$3" audit_out="$run/legacy-$name-audit.log" preserved_out="$run/legacy-$name-preserved.log" poststate_out="$run/legacy-$name-poststate.log" attestation_out="$run/legacy-$name-attestation.json" review_out="$run/legacy-$name-review.json"
+  python3 - "$legacy_audit" "$audit_out" "$legacy_poststate" "$poststate_out" "$audit_code" "$poststate_code" <<'PY'
+import hashlib,sys
+audit_source,audit_out,post_source,post_out,audit_code,post_code=sys.argv[1:];audit=open(audit_source).read().splitlines();exec(audit_code);open(audit_out,'w').write('\n'.join(audit)+'\n');poststate=open(post_source).read().splitlines();poststate=[('original_audit_sha256='+hashlib.sha256(open(audit_out,'rb').read()).hexdigest()) if line.startswith('original_audit_sha256=') else line for line in poststate];exec(post_code);open(post_out,'w').write('\n'.join(poststate)+'\n')
+PY
+  chmod 600 "$audit_out" "$poststate_out";/bin/cp "$audit_out" "$preserved_out";chmod 600 "$preserved_out";sign "$poststate_out"
+  python3 - "$legacy_attestation" "$attestation_out" "$audit_out" "$preserved_out" "$poststate_out" <<'PY'
+import hashlib,json,os,stat,sys
+source,out,audit,preserved,poststate=sys.argv[1:];value=json.load(open(source));ref=lambda path:{'path':path,'sha256':hashlib.sha256(open(path,'rb').read()).hexdigest()};state=os.stat(audit);value['sources']['original_execution_audit']=ref(audit);value['sources']['preserved_execution_audit']=ref(preserved);value['sources']['current_poststate']=ref(poststate);value['sources']['current_poststate_hmac']=ref(poststate+'.hmac');value['original_execution_audit'].update({'sha256':ref(audit)['sha256'],'bytes':state.st_size,'device':str(state.st_dev),'inode':str(state.st_ino),'uid':state.st_uid,'gid':state.st_gid,'mode':format(stat.S_IMODE(state.st_mode),'04o'),'mtime_epoch':int(state.st_mtime)});open(out,'w').write(json.dumps(value,sort_keys=True,separators=(',',':'))+'\n')
+PY
+  chmod 600 "$attestation_out";sign "$attestation_out";make_review "$attestation_out" "$review_out"
+  expect_fail "legacy_$name" python3 "$MODEL" verify-legacy-reconciliation --attestation "$attestation_out" --review "$review_out" --domain "$domain" --now-epoch "$history_now"
+}
+legacy_chronology_variant marker_outside_audit_bounds "line=next(item for item in audit if '_FILES_QUARANTINED_V1|' in item);audit.remove(line);audit.insert(0,line)" "pass"
+legacy_chronology_variant reversed_database_markers "a=next(i for i,item in enumerate(audit) if '_DB_APPLY_V1|' in item);b=next(i for i,item in enumerate(audit) if '_DB_AFTER_V1|' in item);audit[a],audit[b]=audit[b],audit[a]" "pass"
+legacy_chronology_variant observation_end_before_begin "pass" "i=next(i for i,item in enumerate(poststate) if 'OBSERVATION_END index=0' in item);poststate[i]='2000-01-01T00:00:00Z\\tOBSERVATION_END index=0'"
+legacy_chronology_variant future_http_evidence "pass" "i=next(i for i,item in enumerate(poststate) if 'HTTP_ISOLATION endpoint=public' in item);poststate[i]='2099-01-01T00:00:00Z\\tHTTP_ISOLATION endpoint=public route=/ denied=1'"
+legacy_chronology_variant future_unknown_audit_record "audit.insert(-1,'2099-01-01T00:00:00Z\\tOPEN endpoint=public route=/ frame=403||0')" "pass"
+legacy_chronology_variant timestamped_abort_record "stamp=audit[-1].split('\\t',1)[0];audit.insert(-1,stamp+'\\tABORT reason=synthetic')" "pass"
+legacy_no_origin="$run/legacy-no-origin-poststate.log"
+python3 - "$legacy_poststate" "$legacy_no_origin" <<'PY'
+import sys
+source,out=sys.argv[1:];lines=open(source).read().splitlines();open(out,'w').write('\n'.join(line for line in lines if 'endpoint=origin ' not in line)+'\n')
+PY
+chmod 600 "$legacy_no_origin";sign "$legacy_no_origin"
+legacy_no_origin_attestation="$run/legacy-no-origin-attestation.json";legacy_no_origin_review="$run/legacy-no-origin-review.json"
+python3 - "$legacy_attestation" "$legacy_no_origin_attestation" "$legacy_no_origin" <<'PY'
+import hashlib,json,sys
+source,out,poststate=sys.argv[1:];value=json.load(open(source));ref=lambda path:{'path':path,'sha256':hashlib.sha256(open(path,'rb').read()).hexdigest()};value['sources']['current_poststate']=ref(poststate);value['sources']['current_poststate_hmac']=ref(poststate+'.hmac');open(out,'w').write(json.dumps(value,sort_keys=True,separators=(',',':'))+'\n')
+PY
+chmod 600 "$legacy_no_origin_attestation";sign "$legacy_no_origin_attestation";make_review "$legacy_no_origin_attestation" "$legacy_no_origin_review"
+expect_fail legacy_observation_without_origin python3 "$MODEL" verify-legacy-reconciliation --attestation "$legacy_no_origin_attestation" --review "$legacy_no_origin_review" --domain "$domain" --now-epoch "$history_now"
+cp "$legacy_audit" "$run/legacy-audit-backup";printf 'tampered\n' >>"$legacy_audit"
+expect_fail legacy_tampered_original_audit python3 "$MODEL" verify-legacy-reconciliation --attestation "$legacy_attestation" --review "$legacy_review" --domain "$domain" --now-epoch "$history_now"
+mv "$run/legacy-audit-backup" "$legacy_audit"
+pass legacy_reconciled_execution_explicit_weaker_path
 printf 'PASS: Emergency Operator Mode v1 targeted matrix\n'
