@@ -100,6 +100,9 @@ cat >"$run/launcher" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ "${1:-}" == --execute && "${2:-}" =~ ^[a-f0-9]{64}$ ]]||exit 20
+if [[ -n "${WAPP_TEST_CLOSURE_REPLAY_PROBE:-}" ]];then
+  : >"$WAPP_TEST_CLOSURE_REPLAY_PROBE"
+fi
 printf 'SYNTHETIC REVIEWED LAUNCHER — NO TARGET ACCESS\n'
 EOF
 chmod 700 "$run/launcher"
@@ -309,4 +312,149 @@ v=json.load(open(sys.argv[1]));v['assurance_limitations']=['bad\x1b[2J'];open(sy
 PY
 expect_fail closure_terminal_control python3 "$MODEL" verify-closure --record "$run/control-closure.json" --domain "$domain" --now-epoch "$now"
 pass closure_all_statuses
+
+# Executed packages are deliberately expired and consumed before a later,
+# read-only closure is evaluated.  The fresh closure binds the immutable
+# historical operation; it must never turn that operation into replay authority.
+history_now="$((now+7200))"
+mkdir -m 700 "$run/consumed" "$run/historical-reopen-consumed"
+printf '%s\n' "$package_sha" >"$run/consumed/package-sha256";chmod 600 "$run/consumed/package-sha256"
+historical_reopen="$run/historical-reopen-package.json"
+python3 - "$historical_reopen" "$domain" "$package_sha" "$run" <<'PY'
+import json,os,sys
+out,domain,remediation_sha,run=sys.argv[1:]
+value={'tool':'wapp-security-private-emergency-reopen-package','schema':1,'domain':domain,'reopen_operation_id':'c'*32,'remediation_operation_id':'a'*32,'evidence':{'remediation_package_sha256':remediation_sha},'exact_mutation':{'destination':'/home/user_42/app_42','expected_root_device':'1','expected_root_inode':'2'},'one_shot':{'required':True,'consumption_marker':os.path.join(run,'historical-reopen-consumed')},'authority':{'canonical_ready':False,'provider_authorized':False,'verified_clean':False,'closure':False}}
+open(out,'w').write(json.dumps(value,sort_keys=True,separators=(',',':'))+'\n')
+PY
+sign "$historical_reopen";historical_reopen_sha="$(recovery_sha256_file "$historical_reopen")"
+printf '%s\n' "$historical_reopen_sha" >"$run/historical-reopen-consumed/package-sha256";chmod 600 "$run/historical-reopen-consumed/package-sha256"
+historical_reopen_review="$run/historical-reopen-review.json";make_review "$historical_reopen" "$historical_reopen_review"
+remediation_audit_source="$run/historical-remediation-audit-source.txt";printf '%s\n' "$domain operation=$(printf 'a%.0s' {1..32}) package=$package_sha EXECUTED" >"$remediation_audit_source";sign "$remediation_audit_source"
+remediation_poststate_source="$run/historical-remediation-poststate-source.txt";printf '%s\n' "$domain operation=$(printf 'a%.0s' {1..32}) APPLIED_EXACT_AND_POSTCHECK_VERIFIED_YELLOW" >"$remediation_poststate_source";sign "$remediation_poststate_source"
+reopen_audit_source="$run/historical-reopen-audit-source.txt";printf '%s\n' "reopen=$(printf 'c%.0s' {1..32}) remediation=$(printf 'a%.0s' {1..32}) package=$historical_reopen_sha EXECUTED" >"$reopen_audit_source";sign "$reopen_audit_source"
+postopen_source="$run/historical-postopen-source.txt";printf '%s\n' "$domain reopen=$(printf 'c%.0s' {1..32}) remediation=$(printf 'a%.0s' {1..32}) APPLIED_EXACT_AND_POSTOPEN_VERIFIED_YELLOW" >"$postopen_source";sign "$postopen_source"
+remediation_audit="$run/historical-remediation-audit.json";remediation_poststate="$run/historical-remediation-poststate.json";reopen_audit="$run/historical-reopen-audit.json";postopen="$run/historical-postopen.json"
+python3 - "$remediation_audit" "$remediation_poststate" "$reopen_audit" "$postopen" "$remediation_audit_source" "$remediation_poststate_source" "$reopen_audit_source" "$postopen_source" "$domain" "$history_now" "$package_sha" "$historical_reopen_sha" "$postcheck" <<'PY'
+import hashlib,json,sys
+rem_audit,rem_state,rep_audit,postopen,rem_source,state_source,rep_source,post_source,domain,now,rem_sha,rep_sha,postcheck=sys.argv[1:];now=int(now);ref=lambda p:{'path':p,'sha256':hashlib.sha256(open(p,'rb').read()).hexdigest()};pc=json.load(open(postcheck));root='/home/user_42/app_42';rem_op='a'*32;rep_op='c'*32
+audit={'tool':'wapp-security-emergency-historical-execution-audit','schema':1,'phase':'REMEDIATION','domain':domain,'root':root,'operation_id':rem_op,'package_sha256':rem_sha,'started_at_epoch':now-400,'completed_at_epoch':now-300,'source_audit':ref(rem_source),'human_operator_confirmed':True,'actions_completed':True,'read_only_validation':True,'authority':False};open(rem_audit,'w').write(json.dumps(audit,sort_keys=True,separators=(',',':'))+'\n')
+state={'tool':'wapp-security-emergency-historical-remediation-poststate','schema':1,'state':'APPLIED_EXACT_AND_POSTCHECK_VERIFIED_YELLOW','domain':domain,'root':root,'root_device':'1','root_inode':'2','operation_id':rem_op,'package_sha256':rem_sha,'isolation_identity_sha256':pc['isolation_identity_sha256'],'generated_at_epoch':now-250,'isolation_active':True,'recurrence':False,'incident_targets_absent':True,'source_poststate':ref(state_source),'read_only_validation':True,'authority':False};open(rem_state,'w').write(json.dumps(state,sort_keys=True,separators=(',',':'))+'\n')
+audit={'tool':'wapp-security-emergency-historical-execution-audit','schema':1,'phase':'REOPEN','domain':domain,'root':root,'operation_id':rep_op,'package_sha256':rep_sha,'remediation_operation_id':rem_op,'remediation_package_sha256':rem_sha,'started_at_epoch':now-200,'completed_at_epoch':now-150,'source_audit':ref(rep_source),'human_operator_confirmed':True,'actions_completed':True,'read_only_validation':True,'authority':False};open(rep_audit,'w').write(json.dumps(audit,sort_keys=True,separators=(',',':'))+'\n')
+state={'tool':'wapp-security-emergency-historical-post-open-verification','schema':1,'state':'APPLIED_EXACT_AND_POSTOPEN_VERIFIED_YELLOW','domain':domain,'root':root,'root_device':'1','root_inode':'2','remediation_operation_id':rem_op,'remediation_package_sha256':rem_sha,'reopen_operation_id':rep_op,'reopen_package_sha256':rep_sha,'generated_at_epoch':now-100,'isolation_reversed':True,'post_open_verified':True,'recurrence':False,'incident_targets_absent':True,'source_post_open':ref(post_source),'read_only_validation':True,'authority':False};open(postopen,'w').write(json.dumps(state,sort_keys=True,separators=(',',':'))+'\n')
+PY
+sign "$remediation_audit";sign "$remediation_poststate";sign "$reopen_audit";sign "$postopen"
+historical_lineage="$run/historical-lineage.json"
+python3 - "$historical_lineage" "$domain" "$history_now" "$package" "$review" "$run/consumed/package-sha256" "$remediation_audit" "$remediation_poststate" "$historical_reopen" "$historical_reopen_review" "$run/historical-reopen-consumed/package-sha256" "$reopen_audit" "$postopen" "$postcheck" <<'PY'
+import hashlib,json,sys
+out,domain,now,package,review,consumption,audit,poststate,reopen,reopen_review,reopen_consumption,reopen_audit,postopen,postcheck=sys.argv[1:]
+now=int(now);ref=lambda p:{'path':p,'sha256':hashlib.sha256(open(p,'rb').read()).hexdigest()};rem=json.load(open(package));pc=json.load(open(postcheck));rep=json.load(open(reopen))
+value={'tool':'wapp-security-emergency-historical-execution-lineage','schema':1,'state':'EXECUTED_AND_POSTOPEN_VERIFIED_HISTORICAL','domain':domain,'root':rem['site']['root'],'generated_at_epoch':now,'isolation_identity_sha256':pc['isolation_identity_sha256'],'remediation':{'package':ref(package),'review':ref(review),'operation_id':rem['operation_id'],'consumption_identity':ref(consumption),'execution_audit':ref(audit),'execution_poststate':ref(poststate)},'reopen':{'package':ref(reopen),'review':ref(reopen_review),'operation_id':rep['reopen_operation_id'],'remediation_operation_id':rem['operation_id'],'remediation_package_sha256':hashlib.sha256(open(package,'rb').read()).hexdigest(),'consumption_identity':ref(reopen_consumption),'execution_audit':ref(reopen_audit),'post_open_verification':ref(postopen)},'authority':False}
+open(out,'w').write(json.dumps(value,sort_keys=True,separators=(',',':'))+'\n')
+PY
+sign "$historical_lineage";historical_lineage_review="$run/historical-lineage-review.json";make_review "$historical_lineage" "$historical_lineage_review"
+historical_evidence="$run/historical-closure-evidence.json";historical_closure="$run/historical-closure.json"
+historical_site_identity="$run/historical-current-site-identity.json"
+python3 - "$historical_site_identity" "$domain" "$history_now" "$current_commit" <<'PY'
+import json,sys
+out,domain,now,commit=sys.argv[1:];value={'tool':'wapp-security-emergency-current-site-identity','schema':1,'domain':domain,'root':'/home/user_42/app_42','operation_id':'a'*32,'product_commit':commit,'generated_at_epoch':int(now),'root_device':'1','root_inode':'2','serving_root_verified':True,'read_only':True,'authority':False};open(out,'w').write(json.dumps(value,sort_keys=True,separators=(',',':'))+'\n')
+PY
+sign "$historical_site_identity"
+python3 - "$historical_evidence" "$historical_closure" "$historical_lineage" "$historical_lineage_review" "$historical_site_identity" "$run/product.json" "$domain" "$history_now" "$current_commit" <<'PY'
+import hashlib,json,sys
+evidence,closure,lineage,lineage_review,site_identity,product,domain,now,commit=sys.argv[1:];now=int(now);ref=lambda p:{'path':p,'sha256':hashlib.sha256(open(p,'rb').read()).hexdigest()};lin=json.load(open(lineage));checks={'critical':0,'high':0,'filesystem_complete':True,'database_complete':True,'runtime_ok':True,'recurrence':False,'unknown_executable_persistence':False,'unresolved_malicious_privileged_access':False,'incident_targets_absent':True}
+e={'tool':'wapp-security-emergency-closure-evidence','schema':1,'domain':domain,'root':lin['root'],'operation_id':lin['remediation']['operation_id'],'product_commit':commit,'generated_at_epoch':now,'scan':{'critical':0,'high':0},'coverage':{'filesystem_complete':True,'database_complete':True,'runtime_ok':True},'recurrence':{'detected':False,'unknown_executable_persistence':False,'incident_targets_absent':True},'identity':{'unresolved_malicious_privileged_access':False}};open(evidence,'w').write(json.dumps(e,sort_keys=True,separators=(',',':'))+'\n')
+v={'tool':'wapp-security-emergency-closure-record','schema':2,'domain':domain,'root':lin['root'],'operation_id':lin['remediation']['operation_id'],'generated_at_epoch':now,'fresh_until_epoch':now+3600,'product':{'commit':commit,'seal':ref(product)},'historical_execution':{'lineage':ref(lineage),'review':ref(lineage_review)},'current_site_identity':ref(site_identity),'evidence':[ref(evidence)],'checks':checks,'assurance_limitations':[],'hardening_findings':[],'authority':False};open(closure,'w').write(json.dumps(v,sort_keys=True,separators=(',',':'))+'\n')
+PY
+sign "$historical_evidence";sign "$historical_closure"
+python3 "$MODEL" verify-closure --record "$historical_closure" --domain "$domain" --now-epoch "$history_now" | grep -Fq WORDPRESS_INCIDENT_VERIFIED_CLEAN || fail historical_executed_closure
+pass historical_expired_consumed_lineage
+
+historical_variant(){
+  local name="$1" code="$2" source="${3:-$historical_lineage}" out="$run/historical-$name-lineage.json" review_out="$run/historical-$name-review.json" closure_out="$run/historical-$name-closure.json"
+  python3 - "$source" "$out" "$code" <<'PY'
+import json,sys
+source,out,code=sys.argv[1:];v=json.load(open(source));exec(code);open(out,'w').write(json.dumps(v,sort_keys=True,separators=(',',':'))+'\n')
+PY
+  sign "$out";make_review "$out" "$review_out"
+  python3 - "$historical_closure" "$closure_out" "$out" "$review_out" <<'PY'
+import hashlib,json,sys
+source,out,lineage,review=sys.argv[1:];v=json.load(open(source));ref=lambda p:{'path':p,'sha256':hashlib.sha256(open(p,'rb').read()).hexdigest()};v['historical_execution']={'lineage':ref(lineage),'review':ref(review)};open(out,'w').write(json.dumps(v,sort_keys=True,separators=(',',':'))+'\n')
+PY
+  sign "$closure_out"
+}
+
+mv "$run/consumed" "$run/consumed.saved"
+expect_fail historical_expired_unexecuted python3 "$MODEL" verify-closure --record "$historical_closure" --domain "$domain" --now-epoch "$history_now"
+mv "$run/consumed.saved" "$run/consumed"
+
+historical_variant missing-audit "del v['remediation']['execution_audit']"
+expect_fail historical_consumed_without_audit python3 "$MODEL" verify-closure --record "$run/historical-missing-audit-closure.json" --domain "$domain" --now-epoch "$history_now"
+
+wrong_audit="$run/historical-wrong-audit.json";python3 - "$remediation_audit" "$wrong_audit" <<'PY'
+import json,sys
+source,out=sys.argv[1:];v=json.load(open(source));v['actions_completed']=False;open(out,'w').write(json.dumps(v,sort_keys=True,separators=(',',':'))+'\n')
+PY
+sign "$wrong_audit"
+historical_variant wrong-audit "import hashlib;v['remediation']['execution_audit']={'path':'$wrong_audit','sha256':hashlib.sha256(open('$wrong_audit','rb').read()).hexdigest()}"
+expect_fail historical_wrong_execution_audit python3 "$MODEL" verify-closure --record "$run/historical-wrong-audit-closure.json" --domain "$domain" --now-epoch "$history_now"
+
+wrong_poststate="$run/historical-wrong-poststate.json";python3 - "$remediation_poststate" "$wrong_poststate" <<'PY'
+import json,sys
+source,out=sys.argv[1:];v=json.load(open(source));v['recurrence']=True;open(out,'w').write(json.dumps(v,sort_keys=True,separators=(',',':'))+'\n')
+PY
+sign "$wrong_poststate"
+historical_variant wrong-poststate "import hashlib;v['remediation']['execution_poststate']={'path':'$wrong_poststate','sha256':hashlib.sha256(open('$wrong_poststate','rb').read()).hexdigest()}"
+expect_fail historical_contradictory_poststate python3 "$MODEL" verify-closure --record "$run/historical-wrong-poststate-closure.json" --domain "$domain" --now-epoch "$history_now"
+
+wrong_postopen="$run/historical-wrong-postopen.json";python3 - "$postopen" "$wrong_postopen" <<'PY'
+import json,sys
+source,out=sys.argv[1:];v=json.load(open(source));v['incident_targets_absent']=False;open(out,'w').write(json.dumps(v,sort_keys=True,separators=(',',':'))+'\n')
+PY
+sign "$wrong_postopen"
+historical_variant wrong-postopen "import hashlib;v['reopen']['post_open_verification']={'path':'$wrong_postopen','sha256':hashlib.sha256(open('$wrong_postopen','rb').read()).hexdigest()}"
+expect_fail historical_contradictory_postopen python3 "$MODEL" verify-closure --record "$run/historical-wrong-postopen-closure.json" --domain "$domain" --now-epoch "$history_now"
+
+extra_audit="$run/historical-extra-audit.json";python3 - "$remediation_audit" "$extra_audit" <<'PY'
+import json,sys
+source,out=sys.argv[1:];v=json.load(open(source));v['unexpected']='token-bearing but invalid';open(out,'w').write(json.dumps(v,sort_keys=True,separators=(',',':'))+'\n')
+PY
+sign "$extra_audit"
+historical_variant extra-audit "import hashlib;v['remediation']['execution_audit']={'path':'$extra_audit','sha256':hashlib.sha256(open('$extra_audit','rb').read()).hexdigest()}"
+expect_fail historical_extra_audit_field python3 "$MODEL" verify-closure --record "$run/historical-extra-audit-closure.json" --domain "$domain" --now-epoch "$history_now"
+
+historical_variant wrong-package-sha "v['remediation']['package']['sha256']='9'*64"
+expect_fail historical_wrong_package_sha python3 "$MODEL" verify-closure --record "$run/historical-wrong-package-sha-closure.json" --domain "$domain" --now-epoch "$history_now"
+
+historical_variant wrong-operation "v['remediation']['operation_id']='d'*32"
+expect_fail historical_wrong_operation python3 "$MODEL" verify-closure --record "$run/historical-wrong-operation-closure.json" --domain "$domain" --now-epoch "$history_now"
+
+historical_variant wrong-reopen "v['reopen']['remediation_operation_id']='d'*32"
+expect_fail historical_wrong_reopen_binding python3 "$MODEL" verify-closure --record "$run/historical-wrong-reopen-closure.json" --domain "$domain" --now-epoch "$history_now"
+
+historical_variant wrong-root "v['root']='/home/user_99/app_99'"
+expect_fail historical_wrong_site_root python3 "$MODEL" verify-closure --record "$run/historical-wrong-root-closure.json" --domain "$domain" --now-epoch "$history_now"
+
+wrong_site_identity="$run/historical-wrong-current-site-identity.json";python3 - "$historical_site_identity" "$wrong_site_identity" <<'PY'
+import json,sys
+source,out=sys.argv[1:];v=json.load(open(source));v['root_inode']='999';open(out,'w').write(json.dumps(v,sort_keys=True,separators=(',',':'))+'\n')
+PY
+sign "$wrong_site_identity"
+wrong_site_closure="$run/historical-wrong-current-site-closure.json";python3 - "$historical_closure" "$wrong_site_closure" "$wrong_site_identity" <<'PY'
+import hashlib,json,sys
+source,out,site=sys.argv[1:];v=json.load(open(source));v['current_site_identity']={'path':site,'sha256':hashlib.sha256(open(site,'rb').read()).hexdigest()};open(out,'w').write(json.dumps(v,sort_keys=True,separators=(',',':'))+'\n')
+PY
+sign "$wrong_site_closure"
+expect_fail historical_same_path_root_substitution python3 "$MODEL" verify-closure --record "$wrong_site_closure" --domain "$domain" --now-epoch "$history_now"
+
+substituted_package="$run/substituted-package.json";python3 - "$package" "$substituted_package" <<'PY'
+import json,sys
+source,out=sys.argv[1:];v=json.load(open(source));v['operation_id']='d'*32;open(out,'w').write(json.dumps(v,sort_keys=True,separators=(',',':'))+'\n')
+PY
+sign "$substituted_package";historical_variant substituted-package "import hashlib;v['remediation']['package']={'path':'$substituted_package','sha256':hashlib.sha256(open('$substituted_package','rb').read()).hexdigest()}"
+expect_fail historical_substituted_package python3 "$MODEL" verify-closure --record "$run/historical-substituted-package-closure.json" --domain "$domain" --now-epoch "$history_now"
+
+replay_probe="$run/closure-replay-probe";rm -f "$replay_probe"
+WAPP_TEST_CLOSURE_REPLAY_PROBE="$replay_probe" python3 "$MODEL" verify-closure --record "$historical_closure" --domain "$domain" --now-epoch "$history_now" >/dev/null
+[[ ! -e "$replay_probe" && -d "$run/consumed" && -d "$run/historical-reopen-consumed" ]] || fail historical_closure_replayed_mutation
+pass historical_closure_no_replay_authority
 printf 'PASS: Emergency Operator Mode v1 targeted matrix\n'

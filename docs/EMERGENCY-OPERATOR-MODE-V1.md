@@ -69,6 +69,16 @@ lineage, a typed post-open receipt and typed closure observations from which all
 closure checks are derived. Stale or cross-site evidence remains
 `STILL_INCOMPLETE`.
 
+Schema 2 closure records may bind fresh read-only closure evidence to a
+previously executed emergency operation. That path requires a separately
+ECDSA-reviewed historical lineage containing the original reviewed remediation
+package, exact one-shot consumption identity, execution audit and poststate,
+plus the reviewed reopen package, its consumption identity, execution audit and
+post-open verification. Expiry is ignored only for this executed historical
+lineage; missing or mismatched execution evidence remains fatal. A fresh signed
+serving-root identity is also mandatory. Historical validation cannot replay a
+launcher or create apply, READY, mutation or closure authority.
+
 ## Deliberate v1 boundary
 
 This release is the generic operator-package layer (fallback B). It does not

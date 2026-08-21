@@ -337,7 +337,7 @@ def bound_file(value: Any, label: str, *, executable: bool = False) -> Path:
     return path
 
 
-def verify_product_seal(path: Path, declared_commit: str) -> None:
+def verify_product_seal(path: Path, declared_commit: str, *, current_runtime: bool = True) -> None:
     value = load(path)
     exact_keys(
         value,
@@ -382,15 +382,20 @@ def verify_product_seal(path: Path, declared_commit: str) -> None:
             fail("Product Seal duplicate component")
         seen.add(relative)
         ordered.append(relative)
-        candidate = project_root / relative
-        if candidate.is_symlink() or not candidate.is_file():
-            fail(f"Product Seal current component unavailable: {relative}")
-        if sha(candidate) != digest(component["sha256"], f"{label}.sha256"):
-            fail(f"Product Seal current component hash drift: {relative}")
-        if candidate.stat().st_size != integer(component["bytes"], f"{label}.bytes"):
-            fail(f"Product Seal current component byte drift: {relative}")
+        component_sha = digest(component["sha256"], f"{label}.sha256")
+        component_bytes = integer(component["bytes"], f"{label}.bytes")
+        if current_runtime:
+            candidate = project_root / relative
+            if candidate.is_symlink() or not candidate.is_file():
+                fail(f"Product Seal current component unavailable: {relative}")
+            if sha(candidate) != component_sha:
+                fail(f"Product Seal current component hash drift: {relative}")
+            if candidate.stat().st_size != component_bytes:
+                fail(f"Product Seal current component byte drift: {relative}")
     if ordered != sorted(ordered) or not REQUIRED_PRODUCT_COMPONENTS.issubset(seen):
         fail("Product Seal current runtime coverage incomplete")
+    if not current_runtime:
+        return
     git_path = "/usr/bin/git"
     if not Path(git_path).is_file() or Path(git_path).is_symlink():
         fail("canonical Git runtime unavailable")
@@ -527,7 +532,34 @@ def verify_action(action: Any, index: int) -> tuple[int, str]:
     return order, stage
 
 
-def verify_package(path: Path, domain: str, *, now: int | None = None) -> dict[str, Any]:
+def verify_consumption_marker(marker: Path, package_sha256: str) -> Path:
+    if marker.is_symlink() or not marker.is_dir():
+        fail("historical package consumption marker unavailable")
+    marker_state = marker.stat()
+    if marker_state.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        fail("historical package consumption marker is group/world writable")
+    identity = marker / "package-sha256"
+    if identity.is_symlink() or not identity.is_file():
+        fail("historical package consumption identity unavailable")
+    identity_state = identity.stat()
+    if identity_state.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        fail("historical package consumption identity is group/world writable")
+    try:
+        raw = identity.read_bytes()
+    except OSError as error:
+        fail(f"historical package consumption identity unreadable: {error}")
+    if raw != (package_sha256 + "\n").encode("ascii"):
+        fail("historical package consumption identity mismatch")
+    return identity
+
+
+def verify_package(
+    path: Path,
+    domain: str,
+    *,
+    now: int | None = None,
+    historical_execution: bool = False,
+) -> dict[str, Any]:
     value = load(path)
     expected = {
         "tool", "schema", "state", "phase", "contract", "classification", "domain", "operation_id",
@@ -543,6 +575,8 @@ def verify_package(path: Path, domain: str, *, now: int | None = None) -> dict[s
     phase = string(value["phase"], "phase")
     if phase not in {"REMEDIATION", "REOPEN"}:
         fail("package phase mismatch")
+    if historical_execution and phase != "REMEDIATION":
+        fail("historical execution package must be remediation")
     if value["contract"] not in {"HUMAN_OPERATOR_EMERGENCY", "HUMAN_OPERATOR_EMERGENCY_SELF_ISOLATED"}:
         fail("package contract mismatch")
     classification = string(value["classification"], "classification")
@@ -557,7 +591,7 @@ def verify_package(path: Path, domain: str, *, now: int | None = None) -> dict[s
     generated = integer(value["generated_at_epoch"], "generated_at_epoch", minimum=1)
     expires = integer(value["expires_at_epoch"], "expires_at_epoch", minimum=generated + 1)
     current_time = int(time.time()) if now is None else now
-    if current_time >= expires:
+    if not historical_execution and current_time >= expires:
         fail("package expired")
 
     site = value["site"]
@@ -578,7 +612,11 @@ def verify_package(path: Path, domain: str, *, now: int | None = None) -> dict[s
     if not re.fullmatch(r"[0-9a-f]{40}", string(value["product"]["commit"], "product.commit")):
         fail("product commit invalid")
     product_seal_path = bound_file(value["product"]["seal"], "product.seal")
-    verify_product_seal(product_seal_path, value["product"]["commit"])
+    verify_product_seal(
+        product_seal_path,
+        value["product"]["commit"],
+        current_runtime=not historical_execution,
+    )
     exact_keys(value["evidence"], {"incident", "prestate", "rollback_index"}, "evidence")
     for key in ("incident", "prestate", "rollback_index"):
         evidence_path = bound_file(value["evidence"][key], f"evidence.{key}")
@@ -695,7 +733,11 @@ def verify_package(path: Path, domain: str, *, now: int | None = None) -> dict[s
     if boolean(one_shot["required"], "one_shot.required") is not True:
         fail("one-shot contract required")
     marker = Path(absolute(one_shot["consumption_marker"], "one_shot.consumption_marker"))
-    if marker.exists() or marker.is_symlink():
+    package_sha256 = sha(path)
+    consumption_identity: Path | None = None
+    if historical_execution:
+        consumption_identity = verify_consumption_marker(marker, package_sha256)
+    elif marker.exists() or marker.is_symlink():
         fail("package already consumed or marker collision")
 
     forensic_path = bound_file(value["forensic_record"], "forensic_record")
@@ -736,7 +778,7 @@ def verify_package(path: Path, domain: str, *, now: int | None = None) -> dict[s
         "contract": value["contract"],
         "operation_id": operation,
         "generated_at_epoch": generated,
-        "package_sha256": sha(path),
+        "package_sha256": package_sha256,
         "expires_at_epoch": expires,
         "root": site["root"],
         "isolation": isolation["method"],
@@ -755,6 +797,9 @@ def verify_package(path: Path, domain: str, *, now: int | None = None) -> dict[s
             value["launcher"]["path"],
             *continuation_dependencies,
         ],
+        "consumption_marker": str(marker),
+        "consumption_identity": str(consumption_identity) if consumption_identity else "",
+        "product_commit": value["product"]["commit"],
     }
 
 
@@ -882,15 +927,419 @@ def derive_closure_checks(path: Path, domain: str, root: str, operation: str, pr
     return checks
 
 
-def verify_closure(path: Path, domain: str, *, now: int | None = None) -> dict[str, Any]:
+def verify_historical_execution_audit(
+    path: Path,
+    phase: str,
+    domain: str,
+    root: str,
+    operation: str,
+    package_sha256: str,
+    minimum_epoch: int,
+    maximum_epoch: int,
+    *,
+    remediation_operation: str = "",
+    remediation_package_sha256: str = "",
+) -> tuple[int, list[str]]:
     value = load(path)
     expected = {
-        "tool", "schema", "domain", "root", "operation_id", "generated_at_epoch",
-        "fresh_until_epoch", "product", "remediation", "reopen", "evidence", "checks",
-        "assurance_limitations", "hardening_findings", "authority",
+        "tool", "schema", "phase", "domain", "root", "operation_id",
+        "package_sha256", "started_at_epoch", "completed_at_epoch", "source_audit",
+        "human_operator_confirmed", "actions_completed", "read_only_validation",
+        "authority",
     }
+    if phase == "REOPEN":
+        expected |= {"remediation_operation_id", "remediation_package_sha256"}
+    exact_keys(value, expected, "historical_execution_audit")
+    started = integer(value["started_at_epoch"], "historical_execution_audit.started_at_epoch", minimum=minimum_epoch)
+    completed = integer(value["completed_at_epoch"], "historical_execution_audit.completed_at_epoch", minimum=started)
+    if (
+        value["tool"] != "wapp-security-emergency-historical-execution-audit"
+        or value["schema"] != 1
+        or value["phase"] != phase
+        or value["domain"] != domain
+        or value["root"] != root
+        or value["operation_id"] != operation
+        or value["package_sha256"] != package_sha256
+        or completed > maximum_epoch
+        or boolean(value["human_operator_confirmed"], "historical_execution_audit.human_operator_confirmed") is not True
+        or boolean(value["actions_completed"], "historical_execution_audit.actions_completed") is not True
+        or boolean(value["read_only_validation"], "historical_execution_audit.read_only_validation") is not True
+        or value["authority"] is not False
+    ):
+        fail("historical execution audit binding/result mismatch")
+    if phase == "REOPEN" and (
+        value["remediation_operation_id"] != remediation_operation
+        or value["remediation_package_sha256"] != remediation_package_sha256
+    ):
+        fail("historical reopen audit remediation binding mismatch")
+    source = bound_file(value["source_audit"], "historical_execution_audit.source_audit")
+    return completed, [str(path), str(source)]
+
+
+def verify_historical_remediation_poststate(
+    path: Path,
+    domain: str,
+    root: str,
+    operation: str,
+    package_sha256: str,
+    isolation_identity: str,
+    root_device: str,
+    root_inode: str,
+    minimum_epoch: int,
+    maximum_epoch: int,
+) -> tuple[int, list[str]]:
+    value = load(path)
+    exact_keys(
+        value,
+        {
+            "tool", "schema", "state", "domain", "root", "root_device", "root_inode",
+            "operation_id", "package_sha256", "isolation_identity_sha256",
+            "generated_at_epoch", "isolation_active", "recurrence",
+            "incident_targets_absent", "source_poststate", "read_only_validation",
+            "authority",
+        },
+        "historical_remediation_poststate",
+    )
+    generated = integer(value["generated_at_epoch"], "historical_remediation_poststate.generated_at_epoch", minimum=minimum_epoch)
+    if (
+        value["tool"] != "wapp-security-emergency-historical-remediation-poststate"
+        or value["schema"] != 1
+        or value["state"] != "APPLIED_EXACT_AND_POSTCHECK_VERIFIED_YELLOW"
+        or value["domain"] != domain
+        or value["root"] != root
+        or value["root_device"] != root_device
+        or value["root_inode"] != root_inode
+        or value["operation_id"] != operation
+        or value["package_sha256"] != package_sha256
+        or value["isolation_identity_sha256"] != isolation_identity
+        or generated > maximum_epoch
+        or boolean(value["isolation_active"], "historical_remediation_poststate.isolation_active") is not True
+        or boolean(value["recurrence"], "historical_remediation_poststate.recurrence") is not False
+        or boolean(value["incident_targets_absent"], "historical_remediation_poststate.incident_targets_absent") is not True
+        or boolean(value["read_only_validation"], "historical_remediation_poststate.read_only_validation") is not True
+        or value["authority"] is not False
+    ):
+        fail("historical remediation poststate binding/result mismatch")
+    source = bound_file(value["source_poststate"], "historical_remediation_poststate.source_poststate")
+    return generated, [str(path), str(source)]
+
+
+def verify_historical_post_open(
+    path: Path,
+    domain: str,
+    root: str,
+    root_device: str,
+    root_inode: str,
+    remediation_operation: str,
+    remediation_package_sha256: str,
+    reopen_operation: str,
+    reopen_package_sha256: str,
+    minimum_epoch: int,
+    maximum_epoch: int,
+) -> tuple[int, list[str], bool, bool]:
+    value = load(path)
+    exact_keys(
+        value,
+        {
+            "tool", "schema", "state", "domain", "root", "root_device", "root_inode",
+            "remediation_operation_id", "remediation_package_sha256",
+            "reopen_operation_id", "reopen_package_sha256", "generated_at_epoch",
+            "isolation_reversed", "post_open_verified", "recurrence",
+            "incident_targets_absent", "source_post_open", "read_only_validation",
+            "authority",
+        },
+        "historical_post_open",
+    )
+    generated = integer(value["generated_at_epoch"], "historical_post_open.generated_at_epoch", minimum=minimum_epoch)
+    for key in ("isolation_reversed", "post_open_verified", "recurrence", "incident_targets_absent", "read_only_validation"):
+        boolean(value[key], f"historical_post_open.{key}")
+    if (
+        value["tool"] != "wapp-security-emergency-historical-post-open-verification"
+        or value["schema"] != 1
+        or value["state"] != "APPLIED_EXACT_AND_POSTOPEN_VERIFIED_YELLOW"
+        or value["domain"] != domain
+        or value["root"] != root
+        or value["root_device"] != root_device
+        or value["root_inode"] != root_inode
+        or value["remediation_operation_id"] != remediation_operation
+        or value["remediation_package_sha256"] != remediation_package_sha256
+        or value["reopen_operation_id"] != reopen_operation
+        or value["reopen_package_sha256"] != reopen_package_sha256
+        or generated > maximum_epoch
+        or value["isolation_reversed"] is not True
+        or value["post_open_verified"] is not True
+        or value["recurrence"] is not False
+        or value["incident_targets_absent"] is not True
+        or value["read_only_validation"] is not True
+        or value["authority"] is not False
+    ):
+        fail("historical post-open binding/result mismatch")
+    source = bound_file(value["source_post_open"], "historical_post_open.source_post_open")
+    return generated, [str(path), str(source)], value["recurrence"], value["incident_targets_absent"]
+
+
+def verify_historical_execution_lineage(
+    path: Path,
+    review_path: Path,
+    domain: str,
+    closure_generated: int,
+) -> dict[str, Any]:
+    value = load(path)
+    exact_keys(
+        value,
+        {
+            "tool", "schema", "state", "domain", "root", "generated_at_epoch",
+            "isolation_identity_sha256", "remediation", "reopen", "authority",
+        },
+        "historical_lineage",
+    )
+    if (
+        value["tool"] != "wapp-security-emergency-historical-execution-lineage"
+        or value["schema"] != 1
+        or value["state"] != "EXECUTED_AND_POSTOPEN_VERIFIED_HISTORICAL"
+        or value["domain"] != domain
+    ):
+        fail("historical execution lineage protocol/domain mismatch")
+    root = absolute(value["root"], "historical_lineage.root")
+    generated = integer(value["generated_at_epoch"], "historical_lineage.generated_at_epoch", minimum=1)
+    if generated > closure_generated:
+        fail("historical execution lineage is future dated")
+    isolation_identity = digest(value["isolation_identity_sha256"], "historical_lineage.isolation_identity_sha256")
+    if value["authority"] is not False:
+        fail("historical execution lineage cannot authorize mutation or closure")
+
+    remediation_entry = value["remediation"]
+    if not isinstance(remediation_entry, dict):
+        fail("historical_lineage.remediation must be an object")
+    exact_keys(
+        remediation_entry,
+        {
+            "package", "review", "operation_id", "consumption_identity",
+            "execution_audit", "execution_poststate",
+        },
+        "historical_lineage.remediation",
+    )
+    remediation_package = bound_file(remediation_entry["package"], "historical_lineage.remediation.package")
+    remediation_review = bound_file(remediation_entry["review"], "historical_lineage.remediation.review")
+    remediation = verify_package(
+        remediation_package,
+        domain,
+        now=closure_generated,
+        historical_execution=True,
+    )
+    verify_review(remediation_review, remediation_package)
+    remediation_operation = string(remediation_entry["operation_id"], "historical_lineage.remediation.operation_id")
+    if remediation_operation != remediation["operation_id"] or remediation["root"] != root:
+        fail("historical remediation operation/site binding mismatch")
+    expected_isolation = canonical_digest({
+        "site": load(remediation_package)["site"],
+        "isolation": load(remediation_package)["isolation"],
+    })
+    if isolation_identity != expected_isolation:
+        fail("historical remediation isolation identity mismatch")
+    remediation_value = load(remediation_package)
+    root_device = string(remediation_value["site"]["root_device"], "historical remediation root_device")
+    root_inode = string(remediation_value["site"]["root_inode"], "historical remediation root_inode")
+    consumption_identity = bound_file(
+        remediation_entry["consumption_identity"],
+        "historical_lineage.remediation.consumption_identity",
+    )
+    if (
+        str(consumption_identity) != remediation["consumption_identity"]
+        or consumption_identity.read_bytes() != (remediation["package_sha256"] + "\n").encode("ascii")
+    ):
+        fail("historical remediation consumption binding mismatch")
+    remediation_audit = bound_file(remediation_entry["execution_audit"], "historical_lineage.remediation.execution_audit")
+    remediation_poststate = bound_file(remediation_entry["execution_poststate"], "historical_lineage.remediation.execution_poststate")
+    remediation_completed, remediation_audit_dependencies = verify_historical_execution_audit(
+        remediation_audit,
+        "REMEDIATION",
+        domain,
+        root,
+        remediation_operation,
+        remediation["package_sha256"],
+        remediation["generated_at_epoch"],
+        generated,
+    )
+    remediation_poststate_generated, remediation_poststate_dependencies = verify_historical_remediation_poststate(
+        remediation_poststate,
+        domain,
+        root,
+        remediation_operation,
+        remediation["package_sha256"],
+        isolation_identity,
+        root_device,
+        root_inode,
+        remediation_completed,
+        generated,
+    )
+
+    reopen_entry = value["reopen"]
+    if not isinstance(reopen_entry, dict):
+        fail("historical_lineage.reopen must be an object")
+    exact_keys(
+        reopen_entry,
+        {
+            "package", "review", "operation_id", "remediation_operation_id",
+            "remediation_package_sha256", "consumption_identity", "execution_audit",
+            "post_open_verification",
+        },
+        "historical_lineage.reopen",
+    )
+    reopen_package = bound_file(reopen_entry["package"], "historical_lineage.reopen.package")
+    reopen_review = bound_file(reopen_entry["review"], "historical_lineage.reopen.review")
+    verify_review(reopen_review, reopen_package)
+    reopen_value = load(reopen_package)
+    reopen_operation = string(reopen_entry["operation_id"], "historical_lineage.reopen.operation_id")
+    if not HEX32.fullmatch(reopen_operation):
+        fail("historical reopen operation identity invalid")
+    remediation_reference = string(
+        reopen_entry["remediation_operation_id"],
+        "historical_lineage.reopen.remediation_operation_id",
+    )
+    remediation_sha_reference = digest(
+        reopen_entry["remediation_package_sha256"],
+        "historical_lineage.reopen.remediation_package_sha256",
+    )
+    if (
+        reopen_value.get("domain") != domain
+        or reopen_value.get("reopen_operation_id") != reopen_operation
+        or reopen_value.get("remediation_operation_id") != remediation_operation
+        or remediation_reference != remediation_operation
+        or remediation_sha_reference != remediation["package_sha256"]
+        or not isinstance(reopen_value.get("evidence"), dict)
+        or reopen_value["evidence"].get("remediation_package_sha256") != remediation["package_sha256"]
+        or not isinstance(reopen_value.get("exact_mutation"), dict)
+        or reopen_value["exact_mutation"].get("destination") != root
+        or reopen_value["exact_mutation"].get("expected_root_device") != root_device
+        or reopen_value["exact_mutation"].get("expected_root_inode") != root_inode
+        or not isinstance(reopen_value.get("authority"), dict)
+        or set(reopen_value["authority"]) != {"canonical_ready", "closure", "provider_authorized", "verified_clean"}
+        or any(item is not False for item in reopen_value["authority"].values())
+    ):
+        fail("historical reopen package lineage mismatch")
+    reopen_one_shot = reopen_value.get("one_shot")
+    if not isinstance(reopen_one_shot, dict) or reopen_one_shot.get("required") is not True:
+        fail("historical reopen one-shot contract missing")
+    reopen_marker = Path(absolute(reopen_one_shot.get("consumption_marker"), "historical reopen consumption marker"))
+    reopen_package_sha = sha(reopen_package)
+    reopen_identity_actual = verify_consumption_marker(reopen_marker, reopen_package_sha)
+    reopen_identity = bound_file(
+        reopen_entry["consumption_identity"],
+        "historical_lineage.reopen.consumption_identity",
+    )
+    if str(reopen_identity) != str(reopen_identity_actual):
+        fail("historical reopen consumption binding mismatch")
+    reopen_audit = bound_file(reopen_entry["execution_audit"], "historical_lineage.reopen.execution_audit")
+    reopen_postopen = bound_file(
+        reopen_entry["post_open_verification"],
+        "historical_lineage.reopen.post_open_verification",
+    )
+    reopen_audit_completed, reopen_audit_dependencies = verify_historical_execution_audit(
+        reopen_audit,
+        "REOPEN",
+        domain,
+        root,
+        reopen_operation,
+        reopen_package_sha,
+        remediation_poststate_generated,
+        generated,
+        remediation_operation=remediation_operation,
+        remediation_package_sha256=remediation["package_sha256"],
+    )
+    reopen_completed, reopen_postopen_dependencies, recurrence, incident_targets_absent = verify_historical_post_open(
+        reopen_postopen,
+        domain,
+        root,
+        root_device,
+        root_inode,
+        remediation_operation,
+        remediation["package_sha256"],
+        reopen_operation,
+        reopen_package_sha,
+        reopen_audit_completed,
+        generated,
+    )
+    verify_review(review_path, path)
+    return {
+        "domain": domain,
+        "root": root,
+        "operation_id": remediation_operation,
+        "remediation_package_sha256": remediation["package_sha256"],
+        "reopen_operation_id": reopen_operation,
+        "reopen_package_sha256": reopen_package_sha,
+        "product_commit": remediation["product_commit"],
+        "root_device": root_device,
+        "root_inode": root_inode,
+        "post_open_generated_at_epoch": reopen_completed,
+        "recurrence": recurrence,
+        "incident_targets_absent": incident_targets_absent,
+        "dependencies": [
+            str(path), str(review_path), str(remediation_package), str(remediation_review),
+            *remediation["dependencies"], *remediation_audit_dependencies,
+            *remediation_poststate_dependencies, str(reopen_package), str(reopen_review),
+            *reopen_audit_dependencies, *reopen_postopen_dependencies,
+        ],
+    }
+
+
+def verify_current_site_identity(
+    path: Path,
+    domain: str,
+    root: str,
+    operation: str,
+    product_commit: str,
+    root_device: str,
+    root_inode: str,
+    minimum_epoch: int,
+    maximum_epoch: int,
+) -> int:
+    value = load(path)
+    exact_keys(
+        value,
+        {
+            "tool", "schema", "domain", "root", "operation_id", "product_commit",
+            "generated_at_epoch", "root_device", "root_inode", "serving_root_verified",
+            "read_only", "authority",
+        },
+        "current_site_identity",
+    )
+    generated = integer(value["generated_at_epoch"], "current_site_identity.generated_at_epoch", minimum=minimum_epoch)
+    if (
+        value["tool"] != "wapp-security-emergency-current-site-identity"
+        or value["schema"] != 1
+        or value["domain"] != domain
+        or value["root"] != root
+        or value["operation_id"] != operation
+        or value["product_commit"] != product_commit
+        or value["root_device"] != root_device
+        or value["root_inode"] != root_inode
+        or generated > maximum_epoch
+        or boolean(value["serving_root_verified"], "current_site_identity.serving_root_verified") is not True
+        or boolean(value["read_only"], "current_site_identity.read_only") is not True
+        or value["authority"] is not False
+    ):
+        fail("current site/root identity binding mismatch")
+    string(value["root_device"], "current_site_identity.root_device")
+    string(value["root_inode"], "current_site_identity.root_inode")
+    return generated
+
+
+def verify_closure(path: Path, domain: str, *, now: int | None = None) -> dict[str, Any]:
+    value = load(path)
+    schema = value.get("schema")
+    common = {
+        "tool", "schema", "domain", "root", "operation_id", "generated_at_epoch",
+        "fresh_until_epoch", "product", "evidence", "checks", "assurance_limitations",
+        "hardening_findings", "authority",
+    }
+    expected = common | (
+        {"remediation", "reopen"}
+        if schema == 1
+        else {"historical_execution", "current_site_identity"}
+    )
     exact_keys(value, expected, "closure")
-    if value["tool"] != "wapp-security-emergency-closure-record" or value["schema"] != 1 or value["domain"] != domain:
+    if value["tool"] != "wapp-security-emergency-closure-record" or schema not in {1, 2} or value["domain"] != domain:
         fail("closure protocol/domain mismatch")
     root = absolute(value["root"], "closure.root")
     operation = string(value["operation_id"], "closure.operation_id")
@@ -912,45 +1361,80 @@ def verify_closure(path: Path, domain: str, *, now: int | None = None) -> dict[s
     verify_product_seal(product_path, product_commit)
 
     package_dependencies: list[str] = [str(product_path)]
-    package_summaries: dict[str, dict[str, Any]] = {}
-    package_paths: dict[str, Path] = {}
-    for phase in ("remediation", "reopen"):
-        entry = value[phase]
-        if not isinstance(entry, dict):
-            fail(f"closure.{phase} must be an object")
-        expected_entry = {"package", "review"}
-        if phase == "reopen":
-            expected_entry.add("execution_postcheck")
-        exact_keys(entry, expected_entry, f"closure.{phase}")
-        package_path = bound_file(entry["package"], f"closure.{phase}.package")
-        review_path = bound_file(entry["review"], f"closure.{phase}.review")
-        summary = verify_package(package_path, domain, now=generated)
-        verify_review(review_path, package_path)
-        if summary["phase"] != phase.upper() or summary["root"] != root:
-            fail(f"closure.{phase} package lineage mismatch")
-        package_summaries[phase] = summary
-        package_paths[phase] = package_path
-        package_dependencies.extend([str(package_path), str(review_path)])
-    remediation = package_summaries["remediation"]
-    reopen = package_summaries["reopen"]
-    reopen_value = load(package_paths["reopen"])
-    if (
-        operation != remediation["operation_id"]
-        or value["product"] != load(package_paths["remediation"])["product"]
-        or reopen_value["continuation"]["remediation_package"]["sha256"] != remediation["package_sha256"]
-    ):
-        fail("closure remediation/reopen/Product binding mismatch")
-    reopen_postcheck_path = bound_file(value["reopen"]["execution_postcheck"], "closure.reopen.execution_postcheck")
-    reopen_postcheck = verify_reopen_postcheck(
-        reopen_postcheck_path, domain, root, remediation, reopen, generated,
-    )
-    package_dependencies.append(str(reopen_postcheck_path))
+    if schema == 1:
+        package_summaries: dict[str, dict[str, Any]] = {}
+        package_paths: dict[str, Path] = {}
+        for phase in ("remediation", "reopen"):
+            entry = value[phase]
+            if not isinstance(entry, dict):
+                fail(f"closure.{phase} must be an object")
+            expected_entry = {"package", "review"}
+            if phase == "reopen":
+                expected_entry.add("execution_postcheck")
+            exact_keys(entry, expected_entry, f"closure.{phase}")
+            package_path = bound_file(entry["package"], f"closure.{phase}.package")
+            review_path = bound_file(entry["review"], f"closure.{phase}.review")
+            summary = verify_package(package_path, domain, now=generated)
+            verify_review(review_path, package_path)
+            if summary["phase"] != phase.upper() or summary["root"] != root:
+                fail(f"closure.{phase} package lineage mismatch")
+            package_summaries[phase] = summary
+            package_paths[phase] = package_path
+            package_dependencies.extend([str(package_path), str(review_path)])
+        remediation = package_summaries["remediation"]
+        reopen = package_summaries["reopen"]
+        reopen_value = load(package_paths["reopen"])
+        if (
+            operation != remediation["operation_id"]
+            or value["product"] != load(package_paths["remediation"])["product"]
+            or reopen_value["continuation"]["remediation_package"]["sha256"] != remediation["package_sha256"]
+        ):
+            fail("closure remediation/reopen/Product binding mismatch")
+        reopen_postcheck_path = bound_file(value["reopen"]["execution_postcheck"], "closure.reopen.execution_postcheck")
+        reopen_postcheck = verify_reopen_postcheck(
+            reopen_postcheck_path, domain, root, remediation, reopen, generated,
+        )
+        package_dependencies.append(str(reopen_postcheck_path))
+        evidence_minimum_epoch = reopen_postcheck["generated_at_epoch"]
+        lineage_recurrence = reopen_postcheck["recurrence"]
+        lineage_targets_absent = reopen_postcheck["incident_targets_absent"]
+        lineage_post_open_verified = reopen_postcheck["post_open_verified"]
+        lineage_isolation_reversed = reopen_postcheck["isolation_reversed"]
+    else:
+        historical = value["historical_execution"]
+        if not isinstance(historical, dict):
+            fail("closure.historical_execution must be an object")
+        exact_keys(historical, {"lineage", "review"}, "closure.historical_execution")
+        lineage_path = bound_file(historical["lineage"], "closure.historical_execution.lineage")
+        lineage_review = bound_file(historical["review"], "closure.historical_execution.review")
+        lineage = verify_historical_execution_lineage(lineage_path, lineage_review, domain, generated)
+        if lineage["root"] != root or lineage["operation_id"] != operation:
+            fail("closure historical execution site/operation mismatch")
+        package_dependencies.extend(lineage["dependencies"])
+        current_site_path = bound_file(value["current_site_identity"], "closure.current_site_identity")
+        current_site_generated = verify_current_site_identity(
+            current_site_path,
+            domain,
+            root,
+            operation,
+            product_commit,
+            lineage["root_device"],
+            lineage["root_inode"],
+            lineage["post_open_generated_at_epoch"],
+            generated,
+        )
+        package_dependencies.append(str(current_site_path))
+        evidence_minimum_epoch = current_site_generated
+        lineage_recurrence = lineage["recurrence"]
+        lineage_targets_absent = lineage["incident_targets_absent"]
+        lineage_post_open_verified = True
+        lineage_isolation_reversed = True
     if not isinstance(value["evidence"], list) or len(value["evidence"]) != 1:
         fail("closure requires exactly one canonical evidence artifact")
     evidence_path = bound_file(value["evidence"][0], "closure.evidence[0]")
     derived_checks = derive_closure_checks(
         evidence_path, domain, root, operation, product_commit,
-        reopen_postcheck["generated_at_epoch"], generated,
+        evidence_minimum_epoch, generated,
     )
     evidence_dependencies = [str(evidence_path)]
     checks = value["checks"]
@@ -964,8 +1448,8 @@ def verify_closure(path: Path, domain: str, *, now: int | None = None) -> dict[s
     if checks != derived_checks:
         fail("closure checks are not derived from canonical evidence")
     if (
-        checks["recurrence"] != reopen_postcheck["recurrence"]
-        or checks["incident_targets_absent"] != reopen_postcheck["incident_targets_absent"]
+        checks["recurrence"] != lineage_recurrence
+        or checks["incident_targets_absent"] != lineage_targets_absent
     ):
         fail("closure evidence/reopen postcheck mismatch")
     limitations = value["assurance_limitations"]
@@ -981,7 +1465,7 @@ def verify_closure(path: Path, domain: str, *, now: int | None = None) -> dict[s
     if value["authority"] is not False:
         fail("closure record cannot self-authorize")
     blocked = (
-        current_time >= fresh_until or not reopen_postcheck["isolation_reversed"] or not reopen_postcheck["post_open_verified"]
+        current_time >= fresh_until or not lineage_isolation_reversed or not lineage_post_open_verified
         or critical > 0 or high > 0 or not checks["filesystem_complete"] or not checks["database_complete"]
         or not checks["runtime_ok"] or checks["recurrence"] or checks["unknown_executable_persistence"]
         or checks["unresolved_malicious_privileged_access"] or not checks["incident_targets_absent"]
