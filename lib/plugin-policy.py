@@ -27,6 +27,15 @@ def fail(message: str) -> None:
     raise ValueError(message)
 
 
+def strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            fail(f"duplicate JSON key: {key}")
+        value[key] = item
+    return value
+
+
 def text(value: Any, label: str) -> str:
     if not isinstance(value, str) or not value or "\x00" in value:
         fail(f"{label} must be a non-empty string")
@@ -47,10 +56,18 @@ def read_record(path_text: str) -> dict[str, Any]:
         os.close(descriptor)
     if len(raw) > 16384:
         fail("record exceeds bounded size")
-    value = json.loads(raw)
+    value = json.loads(
+        raw,
+        object_pairs_hook=strict_object,
+        parse_constant=lambda token: fail(f"non-finite JSON value: {token}"),
+    )
     if not isinstance(value, dict) or set(value) != EXACT_KEYS:
         fail("record key set mismatch")
-    if value["tool"] != "wapp-plugin-inventory-record" or value["schema"] != 1:
+    if (
+        value["tool"] != "wapp-plugin-inventory-record"
+        or type(value["schema"]) is not int
+        or value["schema"] != 1
+    ):
         fail("record protocol mismatch")
     return value
 

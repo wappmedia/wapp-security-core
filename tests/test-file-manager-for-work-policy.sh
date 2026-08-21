@@ -28,6 +28,12 @@ write other.json "${exact/file-manager-for-work/synthetic-plugin}"
 [[ "$(run other.json | field disposition)" == NOT_APPLICABLE ]] || fail unrelated
 write malformed.json '{"slug":"file-manager-for-work"}'
 if run malformed.json >/dev/null 2>&1; then fail malformed; fi
+write duplicate.json '{"activation_status":"ACTIVE","author":"Your Name","inventory_sha256":"08f697068f2b2b3758e8a9e8088d88c3e60e6f1c643dd6d9bab84dfbd0166e6c","provenance":"UNKNOWN","schema":1,"slug":"other","slug":"file-manager-for-work","tool":"wapp-plugin-inventory-record","version":"4.2.5"}'
+if run duplicate.json >/dev/null 2>&1; then fail duplicate-key; fi
+write boolean-schema.json "${exact/\"schema\":1/\"schema\":true}"
+if run boolean-schema.json >/dev/null 2>&1; then fail boolean-schema; fi
+write float-schema.json "${exact/\"schema\":1/\"schema\":1.0}"
+if run float-schema.json >/dev/null 2>&1; then fail float-schema; fi
 ln -s exact.json "$TMP/link.json"
 if /bin/bash "$ROOT/bin/wapp-plugin-policy" "$TMP/link.json" >/dev/null 2>&1; then fail symlink; fi
 printf 'PASS: file-manager-for-work exact policy remains flagged and non-authorizing\n'
