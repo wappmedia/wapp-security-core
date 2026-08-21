@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+unset BASH_ENV ENV CDPATH PYTHONPATH PYTHONHOME
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MODEL="$ROOT/lib/emergency-operator-v1.py"
+source "$ROOT/lib/recovery-integrity.sh"
+fail(){ printf 'closure-check: %s\n' "$1" >&2; exit 20; }
+PYTHON=/usr/bin/python3
+[[ -f "$PYTHON" && ! -L "$PYTHON" && -x "$PYTHON" ]] || fail 'canonical Python runtime unavailable'
+signed(){ [[ -f "$1" && ! -L "$1" && -f "$1.hmac" && ! -L "$1.hmac" ]] && recovery_verify_file "$1" "$1.hmac" >/dev/null 2>&1; }
+
+DOMAIN="${1:-}"; [[ -n "$DOMAIN" && $# -eq 1 ]] || fail 'usage: wapp closure-check DOMAIN'
+DOMAIN="$(printf '%s' "$DOMAIN" | tr '[:upper:]' '[:lower:]')"
+[[ "$DOMAIN" =~ ^[a-z0-9][a-z0-9.-]{0,251}[a-z0-9]$ ]] || fail 'invalid domain'
+REPORTS_ROOT="${WAPP_EMERGENCY_REPORTS_ROOT:-$ROOT/reports}"
+[[ "$REPORTS_ROOT" == /* && "$REPORTS_ROOT" != */ && -d "$REPORTS_ROOT" && ! -L "$REPORTS_ROOT" ]] || fail 'reports root must be an existing normalized absolute directory'
+REPORTS_ROOT="$(cd "$REPORTS_ROOT" && pwd -P)"
+REGISTRY="$REPORTS_ROOT/.control/emergency-operator-v1/$DOMAIN.json"
+signed "$REGISTRY" || fail 'current signed emergency registry unavailable'
+SELECTION="$(PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$MODEL" registry-package --registry "$REGISTRY" --domain "$DOMAIN" --phase closure)" || fail 'closure registry binding failed'
+RECORD="$(PYTHONDONTWRITEBYTECODE=1 "$PYTHON" - "$SELECTION" <<'PY'
+import json,sys
+print(json.loads(sys.argv[1])['artifact'])
+PY
+)"
+signed "$RECORD" || fail 'signed closure record unavailable or invalid'
+RESULT="$(PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$MODEL" verify-closure --record "$RECORD" --domain "$DOMAIN")" || fail 'closure record verification failed'
+while IFS= read -r dependency || [[ -n "$dependency" ]]; do
+  [[ -z "$dependency" ]] || signed "$dependency" || fail "signed closure dependency unavailable: $dependency"
+done < <(PYTHONDONTWRITEBYTECODE=1 "$PYTHON" - "$RESULT" <<'PY'
+import json,sys
+for item in json.loads(sys.argv[1])['dependencies']: print(item)
+PY
+)
+RESULT="$(PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$MODEL" verify-closure --record "$RECORD" --domain "$DOMAIN")" || fail 'closure evidence drift during verification'
+PYTHONDONTWRITEBYTECODE=1 "$PYTHON" - "$RESULT" "$RECORD" <<'PY'
+import json,sys
+v=json.loads(sys.argv[1])
+print("\nWAPP SECURITY — INCIDENT CLOSURE CHECK")
+print(f"Domain: {v['domain']}")
+print(f"Status: {v['status']}")
+print(f"Record SHA-256: {v['record_sha256']}")
+print(f"Record: {sys.argv[2]}")
+if v['hardening']:
+    print("Hardening remaining:")
+    for item in v['hardening']: print(f"- {item}")
+if v['assurance_limitations']:
+    print("Documented assurance limitations:")
+    for item in v['assurance_limitations']: print(f"- {item}")
+print("\nThis evaluator does not create closure authority or mutate the target.")
+PY

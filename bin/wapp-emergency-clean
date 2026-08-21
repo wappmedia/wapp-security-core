@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+unset BASH_ENV ENV CDPATH PYTHONPATH PYTHONHOME
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MODEL="$ROOT/lib/emergency-operator-v1.py"
+source "$ROOT/lib/recovery-integrity.sh"
+fail(){ printf 'emergency-clean: %s\n' "$1" >&2; exit 20; }
+PYTHON=/usr/bin/python3
+[[ -f "$PYTHON" && ! -L "$PYTHON" && -x "$PYTHON" ]] || fail 'canonical Python runtime unavailable'
+sha(){ recovery_sha256_file "$1"; }
+signed(){ [[ -f "$1" && ! -L "$1" && -f "$1.hmac" && ! -L "$1.hmac" ]] && recovery_verify_file "$1" "$1.hmac" >/dev/null 2>&1; }
+field(){ PYTHONDONTWRITEBYTECODE=1 "$PYTHON" - "$1" "$2" <<'PY'
+import json,sys
+v=json.loads(sys.argv[1])
+for key in sys.argv[2].split('.'):
+    v=v[int(key)] if isinstance(v,list) and key.isdigit() else v[key]
+if isinstance(v,bool): print(str(v).lower())
+elif isinstance(v,(str,int)): print(v)
+else: raise SystemExit(20)
+PY
+}
+usage(){ cat <<'EOF'
+Usage:
+  wapp emergency-clean DOMAIN
+  wapp emergency-clean DOMAIN --execute
+  wapp emergency-clean DOMAIN --reopen
+
+The default command verifies and displays the current locked emergency package.
+--execute delegates only to the exact reviewed one-shot launcher; that launcher
+must still obtain the package-bound human confirmation. --reopen uses a separate
+locked reopen package and never performs incident rollback.
+EOF
+}
+
+DOMAIN="${1:-}"; [[ -n "$DOMAIN" ]] || { usage >&2; exit 64; }; shift || true
+DOMAIN="$(printf '%s' "$DOMAIN" | tr '[:upper:]' '[:lower:]')"
+[[ "$DOMAIN" =~ ^[a-z0-9][a-z0-9.-]{0,251}[a-z0-9]$ ]] || fail 'invalid domain'
+MODE=review
+case "${1:-}" in
+  '') ;;
+  --execute) MODE=execute; shift ;;
+  --reopen) MODE=reopen; shift ;;
+  -h|--help) usage; exit 0 ;;
+  *) fail 'unsupported argument' ;;
+esac
+[[ $# -eq 0 ]] || fail 'unexpected argument'
+
+REPORTS_ROOT="${WAPP_EMERGENCY_REPORTS_ROOT:-$ROOT/reports}"
+[[ "$REPORTS_ROOT" == /* && "$REPORTS_ROOT" != */ && -d "$REPORTS_ROOT" && ! -L "$REPORTS_ROOT" ]] || fail 'reports root must be an existing normalized absolute directory'
+REPORTS_ROOT="$(cd "$REPORTS_ROOT" && pwd -P)"
+REGISTRY="$REPORTS_ROOT/.control/emergency-operator-v1/$DOMAIN.json"
+signed "$REGISTRY" || fail 'current signed emergency registry unavailable'
+PHASE=remediation; [[ "$MODE" == reopen ]] && PHASE=reopen
+REGISTRY_SELECTION="$(PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$MODEL" registry-package --registry "$REGISTRY" --domain "$DOMAIN" --phase "$PHASE")" || fail 'registry/package binding failed'
+PACKAGE="$(field "$REGISTRY_SELECTION" artifact)"
+REVIEW="$(field "$REGISTRY_SELECTION" review)"
+signed "$PACKAGE" || fail 'locked package HMAC unavailable or invalid'
+signed "$REVIEW" || fail 'independent review HMAC unavailable or invalid'
+SUMMARY="$(PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$MODEL" verify-package --package "$PACKAGE" --domain "$DOMAIN")" || fail 'locked package verification failed'
+while IFS= read -r dependency || [[ -n "$dependency" ]]; do
+  [[ -z "$dependency" ]] || signed "$dependency" || fail "signed package dependency unavailable: $dependency"
+done < <(PYTHONDONTWRITEBYTECODE=1 "$PYTHON" - "$SUMMARY" <<'PY'
+import json,sys
+for item in json.loads(sys.argv[1])['dependencies']: print(item)
+PY
+)
+PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$MODEL" verify-review --review "$REVIEW" --package "$PACKAGE" --domain "$DOMAIN" >/dev/null || fail 'independent package review binding failed'
+SUMMARY="$(PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$MODEL" verify-package --package "$PACKAGE" --domain "$DOMAIN")" || fail 'package/review drift during verification'
+
+printf '\nWAPP SECURITY — HUMAN_OPERATOR_EMERGENCY\n'
+printf 'Domain: %s\nClassification: %s\nContract: %s\nOperation: %s\nPackage SHA-256: %s\nIsolation: %s\nStability: %ss\nRoot: %s\n\n' \
+  "$DOMAIN" "$(field "$SUMMARY" classification)" "$(field "$SUMMARY" contract)" \
+  "$(field "$SUMMARY" operation_id)" "$(field "$SUMMARY" package_sha256)" \
+  "$(field "$SUMMARY" isolation)" "$(field "$SUMMARY" stability_seconds)" "$(field "$SUMMARY" root)"
+PYTHONDONTWRITEBYTECODE=1 "$PYTHON" - "$SUMMARY" <<'PY'
+import json,sys
+v=json.loads(sys.argv[1])
+for action in v['actions']:
+    target=action['target']
+    identity=target.get('path') or target.get('option_name') or target.get('canonical_root') or f"user_id={target.get('user_id')}"
+    print(f"{action['order']}. {action['primitive']} — {identity}")
+print("\nAuthority: HUMAN OPERATOR ONLY — not canonical READY/CLEAN/CLOSED")
+print(f"Required phrase inside reviewed launcher: {v['human_phrase']}")
+PY
+
+LAUNCHER="$(field "$SUMMARY" launcher)"; LAUNCHER_SHA="$(field "$SUMMARY" launcher_sha256)"; PACKAGE_SHA="$(field "$SUMMARY" package_sha256)"
+EXPECTED_PHASE=REMEDIATION; [[ "$MODE" == reopen ]] && EXPECTED_PHASE=REOPEN
+[[ "$(field "$SUMMARY" phase)" == "$EXPECTED_PHASE" ]] || fail 'registry selected wrong package phase'
+if [[ "$MODE" == review ]]; then
+  printf '\nVerified package: %s\nNo target access or mutation performed.\n' "$PACKAGE"
+  printf 'After human review, run exactly:\n  %q emergency-clean %q --execute\n' "$ROOT/wapp" "$DOMAIN"
+  exit 0
+fi
+[[ "$(field "$SUMMARY" classification)" == YELLOW_SELF_REMEDIATION ]] || fail 'self-remediation forbidden for non-YELLOW classification'
+[[ -t 0 && -t 1 ]] || fail 'fresh interactive human terminal required'
+HUMAN_PHRASE="$(field "$SUMMARY" human_phrase)"
+printf '\nSkriv exakt %s och tryck Enter: ' "$HUMAN_PHRASE"
+IFS= read -r HUMAN_CONFIRMATION || fail 'human confirmation unavailable'
+[[ "$HUMAN_CONFIRMATION" == "$HUMAN_PHRASE" ]] || fail 'human confirmation mismatch'
+unset HUMAN_CONFIRMATION HUMAN_PHRASE
+signed "$REGISTRY" || fail 'registry drift after human confirmation'
+AFTER_SELECTION="$(PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$MODEL" registry-package --registry "$REGISTRY" --domain "$DOMAIN" --phase "$PHASE")" || fail 'registry binding drift after human confirmation'
+[[ "$AFTER_SELECTION" == "$REGISTRY_SELECTION" ]] || fail 'registry selection changed after human confirmation'
+signed "$PACKAGE" || fail 'package HMAC drift after human confirmation'
+signed "$REVIEW" || fail 'review HMAC drift after human confirmation'
+AFTER_SUMMARY="$(PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$MODEL" verify-package --package "$PACKAGE" --domain "$DOMAIN")" || fail 'package/Product/current-state drift after human confirmation'
+while IFS= read -r dependency || [[ -n "$dependency" ]]; do
+  [[ -z "$dependency" ]] || signed "$dependency" || fail "signed dependency drift after human confirmation: $dependency"
+done < <(PYTHONDONTWRITEBYTECODE=1 "$PYTHON" - "$AFTER_SUMMARY" <<'PY'
+import json,sys
+for item in json.loads(sys.argv[1])['dependencies']: print(item)
+PY
+)
+PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$MODEL" verify-review --review "$REVIEW" --package "$PACKAGE" --domain "$DOMAIN" >/dev/null || fail 'review/package drift after human confirmation'
+AFTER_SUMMARY="$(PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$MODEL" verify-package --package "$PACKAGE" --domain "$DOMAIN")" || fail 'final package drift after human confirmation'
+[[ "$AFTER_SUMMARY" == "$SUMMARY" ]] || fail 'package lineage changed during human confirmation'
+unset AFTER_SELECTION AFTER_SUMMARY
+exec "$PYTHON" "$MODEL" exec-launcher --launcher "$LAUNCHER" --sha256 "$LAUNCHER_SHA" --package-sha256 "$PACKAGE_SHA"

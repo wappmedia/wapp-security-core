@@ -7,6 +7,11 @@ and presents a human-operated one-shot execution boundary. It does not collect
 customer evidence, create customer plans, provide unrestricted shell access, or
 grant canonical production authority.
 
+Independent package reviews require an asymmetric reviewer signature whose
+public key is pinned in the clean Product Seal runtime. The public distribution
+ships with no trusted production reviewer; a private consumer must add and
+review its own public trust anchor before packages can pass.
+
 ## Commands
 
 ```text

@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMMAND="${1:-help}"
+if [[ $# -gt 0 ]]; then shift; fi
+
+usage(){
+  cat <<'EOF'
+Wapp Security Core
+
+Usage:
+  wapp emergency-clean DOMAIN
+  wapp emergency-clean DOMAIN --execute
+  wapp emergency-clean DOMAIN --reopen
+  wapp closure-check DOMAIN
+  wapp product-seal [OUTPUT]
+  wapp test
+  wapp release-check
+  wapp version
+
+Emergency Operator Mode is human-operated and non-canonical. It never creates
+provider authority, canonical READY, automatic CLEAN, or closure authority.
+EOF
+}
+
+case "$COMMAND" in
+  emergency-clean) exec /bin/bash "$SCRIPT_DIR/wapp-emergency-clean" "$@" ;;
+  closure-check) exec /bin/bash "$SCRIPT_DIR/wapp-closure-check" "$@" ;;
+  product-seal) exec /bin/bash "$SCRIPT_DIR/wapp-product-seal" "$@" ;;
+  test) exec /bin/bash "$SCRIPT_DIR/wapp-test" "$@" ;;
+  release-check) exec /bin/bash "$SCRIPT_DIR/wapp-release-check" "$@" ;;
+  version) tr -d '[:space:]' < "$SCRIPT_DIR/../VERSION"; printf '\n' ;;
+  help|-h|--help) usage ;;
+  *) printf 'Unknown command: %s\n\n' "$COMMAND" >&2; usage >&2; exit 64 ;;
+esac

@@ -1,0 +1,32 @@
+name: Canonical Release Matrix
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  EXPECTED_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+jobs:
+  canonical:
+    name: ${{ matrix.os }} / public-core
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ env.EXPECTED_SHA }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify exact checkout
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - name: Canonical public release gate
+        shell: bash
+        run: /bin/bash bin/wapp-release-check

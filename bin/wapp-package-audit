@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ALLOWLIST="$ROOT/config/public-source-allowlist.txt"
+fail(){ printf 'package-audit: %s\n' "$1" >&2; exit 20; }
+
+[[ -f "$ALLOWLIST" && ! -L "$ALLOWLIST" ]] || fail 'public allowlist unavailable'
+[[ "$(git -C "$ROOT" rev-parse --is-inside-work-tree 2>/dev/null || true)" == true ]] || fail 'git checkout required'
+
+tmp="$(mktemp -d 2>/dev/null || mktemp -d -t wapp-core-audit)"
+trap 'rm -rf "$tmp"' EXIT
+LC_ALL=C sort -u "$ALLOWLIST" > "$tmp/allowed"
+git -C "$ROOT" ls-files | LC_ALL=C sort > "$tmp/tracked"
+cmp -s "$tmp/allowed" "$tmp/tracked" || {
+  diff -u "$tmp/allowed" "$tmp/tracked" >&2 || true
+  fail 'tracked public surface differs from explicit allowlist'
+}
+
+while IFS= read -r relative || [[ -n "$relative" ]]; do
+  [[ -n "$relative" && "$relative" != /* && "$relative" != *'..'* ]] || fail 'invalid allowlist path'
+  path="$ROOT/$relative"
+  [[ -f "$path" && ! -L "$path" ]] || fail "non-regular or symlinked source: $relative"
+done < "$tmp/allowed"
+
+for executable in wapp bin/wapp bin/wapp-closure-check bin/wapp-emergency-clean bin/wapp-package-audit bin/wapp-product-seal bin/wapp-public-data-boundary bin/wapp-release-check bin/wapp-test tests/test-emergency-operator-v1.sh tests/test-public-data-boundary.sh; do
+  [[ -x "$ROOT/$executable" ]] || fail "required executable bit missing: $executable"
+done
+
+printf 'PACKAGE_AUDIT: PASS\n'

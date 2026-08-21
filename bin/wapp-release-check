@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+fail(){ printf 'release-check: %s\n' "$1" >&2; exit 20; }
+
+[[ -z "$(git status --porcelain --untracked-files=no)" ]] || fail 'tracked worktree is dirty'
+/bin/bash bin/wapp-package-audit
+/bin/bash bin/wapp-public-data-boundary
+/bin/bash bin/wapp-test
+
+tmp="$(mktemp -d 2>/dev/null || mktemp -d -t wapp-core-release)"
+trap 'rm -rf "$tmp"' EXIT
+source tests/helpers/recovery-keychain-fixture.sh
+wapp_test_setup_recovery_keychain "$tmp/keychain"
+/bin/bash bin/wapp-product-seal "$tmp/product-seal.json" >/dev/null
+[[ -s "$tmp/product-seal.json" && -s "$tmp/product-seal.json.hmac" ]] || fail 'Product Seal verification failed'
+
+printf 'PUBLIC_CORE_RELEASE_GATE: PASS\n'

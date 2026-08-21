@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)";INTEGRITY_LIB="$PROJECT_DIR/lib/recovery-integrity.sh";REPORTS_DIR="${WAPP_SCAN_REPORTS_DIR:-${PROJECT_DIR}/reports}";OUTPUT="${1:-${REPORTS_DIR}/_product/product-seal-$(date -u '+%Y%m%d-%H%M%S').json}"
+fail(){ printf 'Fel: %s\n' "$1" >&2;exit 1;};esc(){ local v="$1";v="${v//\\/\\\\}";v="${v//\"/\\\"}";printf '%s' "$v";}
+[[ -f "$INTEGRITY_LIB" ]]||fail "Integrity module saknas"
+[[ "$(git -C "$PROJECT_DIR" rev-parse --is-inside-work-tree 2>/dev/null||true)" == true ]]||fail "Git checkout saknas"
+source "$INTEGRITY_LIB"
+commit="$(git -C "$PROJECT_DIR" rev-parse HEAD)";branch="$(git -C "$PROJECT_DIR" branch --show-current 2>/dev/null||true)";version="$([[ -f "$PROJECT_DIR/VERSION" ]]&&tr -d '[:space:]' < "$PROJECT_DIR/VERSION"||printf unknown)";dirty="$(git -C "$PROJECT_DIR" status --porcelain --untracked-files=no -- . ':(exclude)config/sites.csv' 2>/dev/null||true)";[[ -z "$dirty" ]]||fail "Product Seal kräver ren kodtree; lokala kodändringar finns"
+TMP="$(mktemp -d 2>/dev/null||mktemp -d -t wapp-product-seal)";trap 'rm -rf "$TMP"' EXIT;paths="$TMP/paths.txt";items="$TMP/items.tsv";: > "$items"
+# Provenance must follow the actual tracked runtime surface rather than a manually
+# curated list that can lag behind rapid beta development. Operator-specific
+# sites.csv and generated reports are intentionally excluded.
+git -C "$PROJECT_DIR" ls-files -- VERSION wapp wapp-scan install.command update.command uninstall.command bin/wapp 'bin/wapp-*' 'lib/*.sh' 'lib/*.py' 'lib/*.php' 'lib/*.m' config/canonical-components.txt config/provider-authenticators.json config/aws-custody-core.json config/aws-custody-production-policy.json.example config/reviewer-trust-anchors.json | sort -u > "$paths"
+count=0;while IFS= read -r rel||[[ -n "$rel" ]];do [[ -n "$rel" ]]||continue;file="$PROJECT_DIR/$rel";[[ -f "$file" ]]||fail "Tracked toolchain component saknas: $rel";sha="$(recovery_sha256_file "$file")";bytes="$(wc -c < "$file"|tr -d ' ')";printf '%s\t%s\t%s\n' "$rel" "$sha" "$bytes" >> "$items";count=$((count+1));done < "$paths";(( count>0 ))||fail "Tracked toolchain discovery gav inga komponenter"
+mkdir -p "$(dirname "$OUTPUT")";chmod 700 "$(dirname "$OUTPUT")"
+{
+ printf '{\n  "tool":"wapp-security-product-seal",\n  "schema":2,\n  "generated_at":"%s",\n  "version":"%s",\n  "git":{"branch":"%s","commit":"%s","clean":true},\n  "discovery_policy":"tracked runtime toolchain: root launchers + install/update + bin/wapp dispatcher + bin/wapp-* + lib/*.sh + lib/*.py + lib/*.php + lib/*.m + release-sealed provider trust policy + VERSION + canonical surface manifest; sites.csv excluded",\n  "component_count":%d,\n  "components":[\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$(esc "$version")" "$(esc "$branch")" "$commit" "$count"
+ first=1;while IFS=$'\t' read -r rel sha bytes;do [[ $first -eq 0 ]]&&printf ',\n';first=0;printf '    {"path":"%s","sha256":"%s","bytes":%s}' "$(esc "$rel")" "$sha" "$bytes";done < "$items";printf '\n  ],\n  "local_only":true,\n  "site_credentials_used":false\n}\n'
+} > "$OUTPUT";chmod 600 "$OUTPUT";recovery_sign_file "$OUTPUT" >/dev/null;recovery_verify_file "$OUTPUT" "${OUTPUT}.hmac"||fail "Product Seal HMAC verifierar inte"
+printf '\nPRODUCT SEAL CREATED\n====================\nVersion: %s\nGit commit: %s\nTracked runtime components: %d\nManifest: %s\nHMAC: %s\n' "$version" "$commit" "$count" "$OUTPUT" "${OUTPUT}.hmac"
