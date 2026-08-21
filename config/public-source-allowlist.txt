@@ -7,6 +7,7 @@ bin/wapp
 bin/wapp-closure-check
 bin/wapp-emergency-clean
 bin/wapp-package-audit
+bin/wapp-plugin-policy
 bin/wapp-product-seal
 bin/wapp-public-data-boundary
 bin/wapp-release-check
@@ -15,10 +16,13 @@ config/canonical-components.txt
 config/public-source-allowlist.txt
 config/reviewer-trust-anchors.json
 docs/EMERGENCY-OPERATOR-MODE-V1.md
+docs/FILE-MANAGER-FOR-WORK-POLICY.md
 lib/emergency-operator-v1.py
+lib/plugin-policy.py
 lib/recovery-integrity.sh
 tests/helpers/recovery-keychain-fixture.sh
 tests/public-data-boundary.py
 tests/test-emergency-operator-v1.sh
+tests/test-file-manager-for-work-policy.sh
 tests/test-public-data-boundary.sh
 wapp

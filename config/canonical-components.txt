@@ -3,7 +3,9 @@ wapp
 bin/wapp
 bin/wapp-closure-check
 bin/wapp-emergency-clean
+bin/wapp-plugin-policy
 bin/wapp-product-seal
 lib/emergency-operator-v1.py
+lib/plugin-policy.py
 lib/recovery-integrity.sh
 config/reviewer-trust-anchors.json

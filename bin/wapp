@@ -14,6 +14,7 @@ Usage:
   wapp emergency-clean DOMAIN --execute
   wapp emergency-clean DOMAIN --reopen
   wapp closure-check DOMAIN
+  wapp plugin-policy RECORD.json
   wapp product-seal [OUTPUT]
   wapp test
   wapp release-check
@@ -27,6 +28,7 @@ EOF
 case "$COMMAND" in
   emergency-clean) exec /bin/bash "$SCRIPT_DIR/wapp-emergency-clean" "$@" ;;
   closure-check) exec /bin/bash "$SCRIPT_DIR/wapp-closure-check" "$@" ;;
+  plugin-policy) exec /bin/bash "$SCRIPT_DIR/wapp-plugin-policy" "$@" ;;
   product-seal) exec /bin/bash "$SCRIPT_DIR/wapp-product-seal" "$@" ;;
   test) exec /bin/bash "$SCRIPT_DIR/wapp-test" "$@" ;;
   release-check) exec /bin/bash "$SCRIPT_DIR/wapp-release-check" "$@" ;;

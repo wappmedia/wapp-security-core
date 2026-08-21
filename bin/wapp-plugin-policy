@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+unset BASH_ENV ENV CDPATH PYTHONPATH PYTHONHOME
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+[[ $# -eq 1 ]] || { printf 'usage: wapp plugin-policy RECORD.json\n' >&2; exit 64; }
+exec /usr/bin/env python3 -I "$ROOT/lib/plugin-policy.py" "$1"

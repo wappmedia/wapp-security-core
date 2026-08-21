@@ -19,6 +19,7 @@ wapp emergency-clean example.test
 wapp emergency-clean example.test --execute
 wapp emergency-clean example.test --reopen
 wapp closure-check example.test
+wapp plugin-policy plugin-record.json
 ```
 
 The generic runtime supports exact package contracts for file quarantine,
@@ -36,5 +37,11 @@ Core commit and keep every customer artifact outside this repository.
 
 Emergency remediation never automatically means `VERIFIED CLEAN`. Reopen is a
 separate human operation and closure is evaluated independently.
+
+The plugin policy command includes a narrow, non-authorizing rule for the
+`file-manager-for-work` slug. It always flags that slug, requires an exact
+verified inventory fingerprint for `REMOVE_REQUIRED`, and otherwise returns
+`PROVENANCE_REVIEW_REQUIRED`. It never classifies malware without separate
+incident evidence.
 
 See [Emergency Operator Mode v1](docs/EMERGENCY-OPERATOR-MODE-V1.md).
