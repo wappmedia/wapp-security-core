@@ -50,6 +50,19 @@ export WAPP_EMERGENCY_REPORTS_ROOT="$TMP/reports"
 domain='operator-fixture.test';run="$TMP/run with spaces";mkdir -p "$run" "$WAPP_EMERGENCY_REPORTS_ROOT/.control/emergency-operator-v1"
 fail(){ printf 'FAIL: %s\n' "$1" >&2;exit 1; };pass(){ printf 'PASS: %s\n' "$1"; };sign(){ chmod 600 "$1";recovery_sign_file "$1">/dev/null; }
 expect_fail(){ local label="$1";shift;if "$@" >/dev/null 2>&1;then fail "$label accepted";fi;pass "$label"; }
+expect_exact_fail(){ local label="$1" expected="$2" output;shift 2;output="$TMP/$label.err";if "$@" >/dev/null 2>"$output";then fail "$label accepted";fi;grep -Fqx "$expected" "$output"||fail "$label wrong failure class";pass "$label"; }
+verify_review_signature_direct(){
+  python3 - "$MODEL" "$1" <<'PY'
+import importlib.util,json,sys
+model_path,review_path=sys.argv[1:]
+spec=importlib.util.spec_from_file_location('emergency_operator_v1',model_path)
+module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+try:
+    module.verify_review_signature(json.load(open(review_path)))
+except module.ContractError as error:
+    print(str(error),file=sys.stderr);raise SystemExit(20)
+PY
+}
 
 review_private="${WAPP_EMERGENCY_TEST_REVIEW_PRIVATE:?review private key required}"
 make_review(){
@@ -162,7 +175,7 @@ value={'tool':'wapp-security-reviewer-trust-anchors','schema':1,'reviewers':[{'r
 open(out,'w').write(json.dumps(value,sort_keys=True,separators=(',',':'))+'\n')
 PY
   original_review_private="$review_private";review_private="$alternate_private";make_review "$package" "$run/$spec-review.json";review_private="$original_review_private"
-  expect_fail "reviewer_key_type_$spec" python3 "$MODEL" verify-review --review "$run/$spec-review.json" --package "$package" --domain "$domain"
+  expect_exact_fail "reviewer_key_type_$spec" 'reviewer public key is not ECDSA P-256' verify_review_signature_direct "$run/$spec-review.json"
 done
 cp "$TMP/reviewer-trust-original.json" "$trust_config"
 [[ -z "$(git -C "$ROOT" status --porcelain --untracked-files=no)" ]] || fail reviewer_trust_restore
