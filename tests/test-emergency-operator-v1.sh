@@ -63,6 +63,16 @@ except module.ContractError as error:
     print(str(error),file=sys.stderr);raise SystemExit(20)
 PY
 }
+verify_current_dispatch_at(){
+  python3 - "$MODEL" "$package" "$domain" "$1" <<'PY'
+import importlib.util,sys
+from pathlib import Path
+model_path,package,domain,now=sys.argv[1:]
+spec=importlib.util.spec_from_file_location('emergency_operator_v1',model_path)
+module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+module.verify_package(Path(package),domain,now=int(now),current_dispatch=True)
+PY
+}
 
 [[ -x "$(recovery_trusted_fixed_python)" ]] || fail trusted_fixed_python
 pass trusted_fixed_python
@@ -273,7 +283,20 @@ source_postcheck,bad_postcheck,source_reopen,bad_reopen=sys.argv[1:];p=json.load
 PY
 expect_fail reopen_after_recurrence python3 "$MODEL" verify-package --package "$run/reopen-recurrence.json" --domain "$domain" --now-epoch "$now"
 expect_fail expired python3 "$MODEL" verify-package --package "$package" --domain "$domain" --now-epoch "$((now+7200))"
-touch "$run/consumed";expect_fail one_shot_replay python3 "$MODEL" verify-package --package "$package" --domain "$domain" --now-epoch "$now";rm "$run/consumed"
+expect_fail current_dispatch_missing_marker python3 "$MODEL" verify-current-dispatch --package "$package" --review "$review" --domain "$domain" --package-sha256 "$package_sha"
+mkdir -m 700 "$run/consumed";printf '%s\n' "$package_sha" >"$run/consumed/package-sha256";chmod 600 "$run/consumed/package-sha256"
+python3 "$MODEL" verify-current-dispatch --package "$package" --review "$review" --domain "$domain" --package-sha256 "$package_sha" >/dev/null || fail current_dispatch_exact_marker
+pass current_dispatch_exact_marker
+expect_fail one_shot_replay python3 "$MODEL" verify-package --package "$package" --domain "$domain" --now-epoch "$now"
+expect_fail current_dispatch_time_override python3 "$MODEL" verify-current-dispatch --package "$package" --review "$review" --domain "$domain" --package-sha256 "$package_sha" --now-epoch "$now"
+expect_fail current_dispatch_wrong_package_sha python3 "$MODEL" verify-current-dispatch --package "$package" --review "$review" --domain "$domain" --package-sha256 "$(printf '9%.0s' {1..64})"
+expect_fail current_dispatch_expired verify_current_dispatch_at "$((now+7200))"
+chmod 777 "$run/consumed";expect_fail current_dispatch_writable_marker python3 "$MODEL" verify-current-dispatch --package "$package" --review "$review" --domain "$domain" --package-sha256 "$package_sha";chmod 700 "$run/consumed"
+mv "$run/consumed/package-sha256" "$run/consumed/package-sha256.real";ln -s package-sha256.real "$run/consumed/package-sha256"
+expect_fail current_dispatch_symlink_identity python3 "$MODEL" verify-current-dispatch --package "$package" --review "$review" --domain "$domain" --package-sha256 "$package_sha"
+rm "$run/consumed/package-sha256";mv "$run/consumed/package-sha256.real" "$run/consumed/package-sha256"
+expect_fail current_dispatch_wrong_review python3 "$MODEL" verify-current-dispatch --package "$package" --review "$run/hmac-only-review.json" --domain "$domain" --package-sha256 "$package_sha"
+rm -rf "$run/consumed"
 printf tamper >>"$run/incident.json";expect_fail evidence_tamper bash "$CLI" "$domain"
 printf '{"tool":"synthetic","schema":1,"domain":"%s","root":"/home/user_42/app_42","name":"incident"}\n' "$domain" >"$run/incident.json";sign "$run/incident.json"
 pass forensic_dependency_integrity

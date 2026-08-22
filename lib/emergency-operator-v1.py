@@ -560,8 +560,11 @@ def verify_package(
     *,
     now: int | None = None,
     historical_execution: bool = False,
+    current_dispatch: bool = False,
     legacy_consumption_identity: Path | None = None,
 ) -> dict[str, Any]:
+    if historical_execution and current_dispatch:
+        fail("package cannot be both current dispatch and historical execution")
     if legacy_consumption_identity is not None and not historical_execution:
         fail("legacy consumption identity requires explicit historical execution mode")
     value = load(path)
@@ -755,6 +758,8 @@ def verify_package(
             if identity_raw != (package_sha256 + "\n").encode("ascii"):
                 fail("legacy package consumption identity mismatch")
             consumption_identity = legacy_consumption_identity
+    elif current_dispatch:
+        consumption_identity = verify_consumption_marker(marker, package_sha256)
     elif marker.exists() or marker.is_symlink():
         fail("package already consumed or marker collision")
 
@@ -2115,6 +2120,11 @@ def main() -> int:
     package_parser.add_argument("--package", required=True)
     package_parser.add_argument("--domain", required=True)
     package_parser.add_argument("--now-epoch", type=int)
+    dispatch_parser = sub.add_parser("verify-current-dispatch")
+    dispatch_parser.add_argument("--package", required=True)
+    dispatch_parser.add_argument("--review", required=True)
+    dispatch_parser.add_argument("--domain", required=True)
+    dispatch_parser.add_argument("--package-sha256", required=True)
     registry_parser = sub.add_parser("registry-package")
     registry_parser.add_argument("--registry", required=True)
     registry_parser.add_argument("--domain", required=True)
@@ -2145,6 +2155,17 @@ def main() -> int:
             fail("invalid domain")
         if args.command == "verify-package":
             result = verify_package(Path(args.package), domain, now=args.now_epoch)
+            print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+        elif args.command == "verify-current-dispatch":
+            package_path = Path(args.package)
+            if not HEX64.fullmatch(args.package_sha256) or sha(package_path) != args.package_sha256:
+                fail("current dispatch package hash mismatch")
+            result = verify_package(
+                package_path,
+                domain,
+                current_dispatch=True,
+            )
+            verify_review(Path(args.review), package_path)
             print(json.dumps(result, sort_keys=True, separators=(",", ":")))
         elif args.command == "registry-package":
             print(json.dumps(verify_registry(Path(args.registry), domain, args.phase), sort_keys=True, separators=(",", ":")))
