@@ -527,13 +527,12 @@ import importlib.util,pathlib,sys
 model,package,domain,now=sys.argv[1:];spec=importlib.util.spec_from_file_location('m',model);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 m.verify_package(pathlib.Path(package),domain,now=int(now),historical_execution=True)
 PY
-mv "$run/consumed.legacy-test" "$run/consumed"
 
 # Closure may consume the explicit legacy reconciliation only through a typed
 # lineage whose remediation branch is visibly classified as legacy.  The
 # normal signed-execution branch remains a different exact-key contract.
 legacy_historical_lineage="$run/legacy-historical-lineage.json"
-python3 - "$legacy_historical_lineage" "$domain" "$history_now" "$package" "$review" "$run/consumed/package-sha256" "$legacy_attestation" "$legacy_review" "$historical_reopen" "$historical_reopen_review" "$run/historical-reopen-consumed/package-sha256" "$reopen_audit" "$postopen" "$postcheck" <<'PY'
+python3 - "$legacy_historical_lineage" "$domain" "$history_now" "$package" "$review" "$legacy_consumption" "$legacy_attestation" "$legacy_review" "$historical_reopen" "$historical_reopen_review" "$run/historical-reopen-consumed/package-sha256" "$reopen_audit" "$postopen" "$postcheck" <<'PY'
 import hashlib,json,sys
 out,domain,now,package,review,consumption,reconciliation,reconciliation_review,reopen,reopen_review,reopen_consumption,reopen_audit,postopen,postcheck=sys.argv[1:]
 ref=lambda path:{'path':path,'sha256':hashlib.sha256(open(path,'rb').read()).hexdigest()};rem=json.load(open(package));rep=json.load(open(reopen));pc=json.load(open(postcheck));rec=json.load(open(reconciliation))
@@ -548,7 +547,12 @@ source,out,lineage,review=sys.argv[1:];ref=lambda path:{'path':path,'sha256':has
 PY
 sign "$legacy_historical_closure"
 python3 "$MODEL" verify-closure --record "$legacy_historical_closure" --domain "$domain" --now-epoch "$history_now" | grep -Fq WORDPRESS_INCIDENT_VERIFIED_CLEAN || fail legacy_reconciled_historical_closure
+[[ ! -e "$run/consumed" ]] || fail legacy_declared_old_marker_unexpectedly_restored
 pass legacy_reconciled_execution_to_typed_closure
+
+mv "$legacy_consumption" "$legacy_consumption.missing"
+expect_fail legacy_lineage_missing_preserved_consumption python3 "$MODEL" verify-closure --record "$legacy_historical_closure" --domain "$domain" --now-epoch "$history_now"
+mv "$legacy_consumption.missing" "$legacy_consumption"
 
 legacy_lineage_variant(){
   local name="$1" code="$2" out="$run/legacy-lineage-$name.json" review_out="$run/legacy-lineage-$name-review.json" closure_out="$run/legacy-lineage-$name-closure.json"
@@ -572,6 +576,7 @@ legacy_lineage_variant fake_reconciliation "value['remediation']['legacy_reconci
 legacy_lineage_variant normal_signed_pretence "value['state']='EXECUTED_AND_POSTOPEN_VERIFIED_HISTORICAL'"
 legacy_lineage_variant wrong_provenance_class "value['remediation']['provenance_class']='SIGNED_EXECUTION_AUDIT'"
 legacy_lineage_variant wrong_original_audit_sha "value['remediation']['original_execution_audit_sha256']='8'*64"
+legacy_lineage_variant substituted_consumption "value['remediation']['consumption_identity']=value['reopen']['consumption_identity']"
 legacy_variant(){
   local name="$1" code="$2" out="$run/legacy-$name.json" out_review="$run/legacy-$name-review.json"
   python3 - "$legacy_attestation" "$out" "$code" <<'PY'

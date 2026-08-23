@@ -1152,11 +1152,18 @@ def verify_historical_execution_lineage(
     )
     remediation_package = bound_file(remediation_entry["package"], "historical_lineage.remediation.package")
     remediation_review = bound_file(remediation_entry["review"], "historical_lineage.remediation.review")
+    legacy_consumption_identity = None
+    if legacy_lineage:
+        legacy_consumption_identity = bound_file(
+            remediation_entry["consumption_identity"],
+            "historical_lineage.remediation.consumption_identity",
+        )
     remediation = verify_package(
         remediation_package,
         domain,
         now=closure_generated,
         historical_execution=True,
+        legacy_consumption_identity=legacy_consumption_identity,
     )
     verify_review(remediation_review, remediation_package)
     remediation_operation = string(remediation_entry["operation_id"], "historical_lineage.remediation.operation_id")
@@ -1171,10 +1178,14 @@ def verify_historical_execution_lineage(
     remediation_value = load(remediation_package)
     root_device = string(remediation_value["site"]["root_device"], "historical remediation root_device")
     root_inode = string(remediation_value["site"]["root_inode"], "historical remediation root_inode")
-    consumption_identity = bound_file(
-        remediation_entry["consumption_identity"],
-        "historical_lineage.remediation.consumption_identity",
-    )
+    consumption_identity = legacy_consumption_identity
+    if normal_lineage:
+        consumption_identity = bound_file(
+            remediation_entry["consumption_identity"],
+            "historical_lineage.remediation.consumption_identity",
+        )
+    if consumption_identity is None:
+        fail("historical remediation consumption binding unavailable")
     if (
         str(consumption_identity) != remediation["consumption_identity"]
         or consumption_identity.read_bytes() != (remediation["package_sha256"] + "\n").encode("ascii")
