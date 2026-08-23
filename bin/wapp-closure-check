@@ -11,6 +11,14 @@ source "$ROOT/lib/recovery-integrity.sh"
 fail(){ printf 'closure-check: %s\n' "$1" >&2; exit 20; }
 PYTHON="$(recovery_trusted_fixed_python)" || fail 'canonical Python runtime unavailable'
 signed(){ [[ -f "$1" && ! -L "$1" && -f "$1.hmac" && ! -L "$1.hmac" ]] && recovery_verify_file "$1" "$1.hmac" >/dev/null 2>&1; }
+private_file(){
+  local identity mode
+  [[ -f "$1" && ! -L "$1" ]] || return 1
+  identity="$(recovery_stat_owner_mode "$1" 2>/dev/null)" || return 1
+  mode="${identity#* }"; [[ "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+  (( (8#$mode & 8#022) == 0 ))
+}
+signed_pair(){ private_file "$1" && private_file "$2" && recovery_verify_file "$1" "$2" >/dev/null 2>&1; }
 
 DOMAIN="${1:-}"; [[ -n "$DOMAIN" && $# -eq 1 ]] || fail 'usage: wapp closure-check DOMAIN'
 DOMAIN="$(printf '%s' "$DOMAIN" | tr '[:upper:]' '[:lower:]')"
@@ -28,8 +36,57 @@ PY
 )"
 signed "$RECORD" || fail 'signed closure record unavailable or invalid'
 RESULT="$(PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$MODEL" verify-closure --record "$RECORD" --domain "$DOMAIN")" || fail 'closure record verification failed'
+LEGACY_META="$(PYTHONDONTWRITEBYTECODE=1 "$PYTHON" - "$RECORD" <<'PY'
+import json,sys
+record=json.load(open(sys.argv[1]))
+if record.get('schema') != 2: raise SystemExit(0)
+lineage=json.load(open(record['historical_execution']['lineage']['path']))
+remediation=lineage.get('remediation',{})
+if remediation.get('provenance_class') != 'LEGACY_RECONCILED_EXECUTION': raise SystemExit(0)
+attestation=json.load(open(remediation['legacy_reconciliation']['path']))
+sources=attestation['sources']
+values=(
+ sources['original_execution_audit']['path'],sources['preserved_execution_audit']['path'],
+ lineage['remediation']['consumption_identity']['path'],lineage['reopen']['consumption_identity']['path'],
+ remediation['legacy_reconciliation_review']['path'],lineage['reopen']['review']['path'],
+ sources['current_poststate']['path'],sources['current_poststate_hmac']['path'],
+ sources['collector']['path'],sources['collector_hmac']['path'],
+)
+if any(not isinstance(value,str) or '\t' in value or '\n' in value or '\r' in value for value in values):
+ raise SystemExit(20)
+print('\t'.join(values))
+PY
+)" || fail 'legacy closure dependency identities unavailable'
+legacy_unsigned_one='';legacy_unsigned_two='';legacy_rem_consumption='';legacy_reopen_consumption='';legacy_review='';legacy_reopen_review='';legacy_poststate='';legacy_poststate_hmac='';legacy_collector='';legacy_collector_hmac=''
+if [[ -n "$LEGACY_META" ]];then
+  IFS=$'\t' read -r legacy_unsigned_one legacy_unsigned_two legacy_rem_consumption legacy_reopen_consumption legacy_review legacy_reopen_review legacy_poststate legacy_poststate_hmac legacy_collector legacy_collector_hmac <<<"$LEGACY_META"
+  signed_pair "$legacy_poststate" "$legacy_poststate_hmac" || fail 'legacy closure poststate HMAC dependency drift'
+  signed_pair "$legacy_collector" "$legacy_collector_hmac" || fail 'legacy closure collector HMAC dependency drift'
+  PYTHONDONTWRITEBYTECODE=1 "$PYTHON" - "$RESULT" "$LEGACY_META" <<'PY' || fail 'legacy closure dependency role collision'
+import json,sys
+dependencies=json.loads(sys.argv[1])["dependencies"]
+exempt=sys.argv[2].split("\t")
+if len(exempt) != 10 or len(set(exempt)) != len(exempt):
+    raise SystemExit(20)
+counts=[dependencies.count(path) for path in exempt]
+expected=[1,1,1,0,1,1,1,1,1,1]
+if counts != expected:
+    raise SystemExit(20)
+PY
+fi
 while IFS= read -r dependency || [[ -n "$dependency" ]]; do
-  [[ -z "$dependency" ]] || signed "$dependency" || fail "signed closure dependency unavailable: $dependency"
+  [[ -z "$dependency" ]] && continue
+  if [[ -n "$LEGACY_META" && ( "$dependency" == "$legacy_unsigned_one" || "$dependency" == "$legacy_unsigned_two" ) ]];then
+    private_file "$dependency" && [[ ! -e "$dependency.hmac" && ! -L "$dependency.hmac" ]] || fail 'legacy unsigned closure audit dependency drift'
+  elif [[ -n "$LEGACY_META" && ( "$dependency" == "$legacy_rem_consumption" || "$dependency" == "$legacy_reopen_consumption" ) ]];then
+    private_file "$dependency" || fail 'legacy closure consumption dependency drift'
+  elif [[ -n "$LEGACY_META" && ( "$dependency" == "$legacy_review" || "$dependency" == "$legacy_reopen_review" ) ]];then
+    private_file "$dependency" || fail 'legacy closure ECDSA review dependency drift'
+  elif [[ -n "$LEGACY_META" && ( "$dependency" == "$legacy_poststate_hmac" || "$dependency" == "$legacy_collector_hmac" ) ]];then
+    private_file "$dependency" || fail 'legacy closure explicit HMAC dependency drift'
+  else
+    signed "$dependency" || fail "signed closure dependency unavailable: $dependency"
+  fi
 done < <(PYTHONDONTWRITEBYTECODE=1 "$PYTHON" - "$RESULT" <<'PY'
 import json,sys
 for item in json.loads(sys.argv[1])['dependencies']: print(item)

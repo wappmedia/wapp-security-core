@@ -550,6 +550,71 @@ python3 "$MODEL" verify-closure --record "$legacy_historical_closure" --domain "
 [[ ! -e "$run/consumed" ]] || fail legacy_declared_old_marker_unexpectedly_restored
 pass legacy_reconciled_execution_to_typed_closure
 
+legacy_cli_reports="$TMP/legacy-cli-reports";mkdir -m 700 -p "$legacy_cli_reports/.control/emergency-operator-v1"
+legacy_cli_registry="$legacy_cli_reports/.control/emergency-operator-v1/$domain.json"
+python3 - "$legacy_cli_registry" "$domain" "$legacy_historical_closure" <<'PY'
+import hashlib,json,sys
+out,domain,closure=sys.argv[1:];ref=lambda path:{'path':path,'sha256':hashlib.sha256(open(path,'rb').read()).hexdigest()}
+value={'tool':'wapp-security-emergency-operator-registry','schema':1,'domain':domain,'remediation':None,'reopen':None,'closure':{'record':ref(closure)}}
+open(out,'w').write(json.dumps(value,sort_keys=True,separators=(',',':'))+'\n')
+PY
+sign "$legacy_cli_registry"
+legacy_closure_cli="$ROOT/bin/wapp-closure-check-legacy-test-now"
+python3 - "$CLOSURE" "$legacy_closure_cli" "$history_now" <<'PY'
+import sys
+source,out,now=sys.argv[1:];value=open(source).read();needle='verify-closure --record "$RECORD" --domain "$DOMAIN"'
+if value.count(needle) != 2: raise SystemExit('closure verifier call count drift')
+open(out,'w').write(value.replace(needle,needle+' --now-epoch '+now))
+PY
+chmod 700 "$legacy_closure_cli"
+WAPP_EMERGENCY_REPORTS_ROOT="$legacy_cli_reports" "$legacy_closure_cli" "$domain" | grep -Fq WORDPRESS_INCIDENT_VERIFIED_CLEAN || fail legacy_reconciled_closure_cli
+pass legacy_reconciled_closure_cli
+
+legacy_cli_collision_variant(){
+  local name="$1" field="$2" source="$3"
+  local collided_source="$run/legacy-collision-$name-source.json"
+  local collided_lineage="$run/legacy-collision-$name-lineage.json"
+  local collided_review="$run/legacy-collision-$name-lineage-review.json"
+  local collided_closure="$run/legacy-collision-$name-closure.json"
+  python3 - "$source" "$collided_source" "$field" "$legacy_audit" <<'PY'
+import hashlib,json,sys
+source,out,field,collision=sys.argv[1:]
+value=json.load(open(source))
+value[field]={"path":collision,"sha256":hashlib.sha256(open(collision,"rb").read()).hexdigest()}
+open(out,"w").write(json.dumps(value,sort_keys=True,separators=(",",":"))+"\n")
+PY
+  sign "$collided_source"
+  python3 - "$legacy_historical_lineage" "$collided_lineage" "$name" "$collided_source" <<'PY'
+import hashlib,json,sys
+source,out,name,replacement=sys.argv[1:]
+value=json.load(open(source));ref={"path":replacement,"sha256":hashlib.sha256(open(replacement,"rb").read()).hexdigest()}
+value["reopen"]["execution_audit" if name == "reopen-audit" else "post_open_verification"]=ref
+open(out,"w").write(json.dumps(value,sort_keys=True,separators=(",",":"))+"\n")
+PY
+  sign "$collided_lineage";make_review "$collided_lineage" "$collided_review"
+  python3 - "$legacy_historical_closure" "$collided_closure" "$collided_lineage" "$collided_review" <<'PY'
+import hashlib,json,sys
+source,out,lineage,review=sys.argv[1:]
+value=json.load(open(source));ref=lambda path:{"path":path,"sha256":hashlib.sha256(open(path,"rb").read()).hexdigest()}
+value["historical_execution"]={"lineage":ref(lineage),"review":ref(review)}
+open(out,"w").write(json.dumps(value,sort_keys=True,separators=(",",":"))+"\n")
+PY
+  sign "$collided_closure"
+  python3 - "$legacy_cli_registry" "$domain" "$collided_closure" <<'PY'
+import hashlib,json,sys
+out,domain,closure=sys.argv[1:]
+ref=lambda path:{"path":path,"sha256":hashlib.sha256(open(path,"rb").read()).hexdigest()}
+value={"tool":"wapp-security-emergency-operator-registry","schema":1,"domain":domain,"remediation":None,"reopen":None,"closure":{"record":ref(closure)}}
+open(out,"w").write(json.dumps(value,sort_keys=True,separators=(",",":"))+"\n")
+PY
+  sign "$legacy_cli_registry"
+  expect_fail "legacy_cli_${name}_path_collision" env WAPP_EMERGENCY_REPORTS_ROOT="$legacy_cli_reports" "$legacy_closure_cli" "$domain"
+}
+legacy_cli_collision_variant reopen-audit source_audit "$reopen_audit"
+legacy_cli_collision_variant post-open source_post_open "$postopen"
+/bin/rm "$legacy_closure_cli"
+pass legacy_reconciled_closure_dependency_role_collisions
+
 mv "$legacy_consumption" "$legacy_consumption.missing"
 expect_fail legacy_lineage_missing_preserved_consumption python3 "$MODEL" verify-closure --record "$legacy_historical_closure" --domain "$domain" --now-epoch "$history_now"
 mv "$legacy_consumption.missing" "$legacy_consumption"
