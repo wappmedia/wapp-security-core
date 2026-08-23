@@ -1116,10 +1116,12 @@ def verify_historical_execution_lineage(
         },
         "historical_lineage",
     )
+    normal_lineage = value["state"] == "EXECUTED_AND_POSTOPEN_VERIFIED_HISTORICAL"
+    legacy_lineage = value["state"] == "LEGACY_RECONCILED_EXECUTION_AND_POSTOPEN_VERIFIED_HISTORICAL"
     if (
         value["tool"] != "wapp-security-emergency-historical-execution-lineage"
         or value["schema"] != 1
-        or value["state"] != "EXECUTED_AND_POSTOPEN_VERIFIED_HISTORICAL"
+        or not (normal_lineage or legacy_lineage)
         or value["domain"] != domain
     ):
         fail("historical execution lineage protocol/domain mismatch")
@@ -1134,12 +1136,18 @@ def verify_historical_execution_lineage(
     remediation_entry = value["remediation"]
     if not isinstance(remediation_entry, dict):
         fail("historical_lineage.remediation must be an object")
+    normal_remediation_keys = {
+        "package", "review", "operation_id", "consumption_identity",
+        "execution_audit", "execution_poststate",
+    }
+    legacy_remediation_keys = {
+        "package", "review", "operation_id", "consumption_identity",
+        "provenance_class", "legacy_reconciliation", "legacy_reconciliation_review",
+        "original_execution_audit_sha256",
+    }
     exact_keys(
         remediation_entry,
-        {
-            "package", "review", "operation_id", "consumption_identity",
-            "execution_audit", "execution_poststate",
-        },
+        normal_remediation_keys if normal_lineage else legacy_remediation_keys,
         "historical_lineage.remediation",
     )
     remediation_package = bound_file(remediation_entry["package"], "historical_lineage.remediation.package")
@@ -1172,30 +1180,71 @@ def verify_historical_execution_lineage(
         or consumption_identity.read_bytes() != (remediation["package_sha256"] + "\n").encode("ascii")
     ):
         fail("historical remediation consumption binding mismatch")
-    remediation_audit = bound_file(remediation_entry["execution_audit"], "historical_lineage.remediation.execution_audit")
-    remediation_poststate = bound_file(remediation_entry["execution_poststate"], "historical_lineage.remediation.execution_poststate")
-    remediation_completed, remediation_audit_dependencies = verify_historical_execution_audit(
-        remediation_audit,
-        "REMEDIATION",
-        domain,
-        root,
-        remediation_operation,
-        remediation["package_sha256"],
-        remediation["generated_at_epoch"],
-        generated,
-    )
-    remediation_poststate_generated, remediation_poststate_dependencies = verify_historical_remediation_poststate(
-        remediation_poststate,
-        domain,
-        root,
-        remediation_operation,
-        remediation["package_sha256"],
-        isolation_identity,
-        root_device,
-        root_inode,
-        remediation_completed,
-        generated,
-    )
+    if normal_lineage:
+        remediation_audit = bound_file(remediation_entry["execution_audit"], "historical_lineage.remediation.execution_audit")
+        remediation_poststate = bound_file(remediation_entry["execution_poststate"], "historical_lineage.remediation.execution_poststate")
+        remediation_completed, remediation_audit_dependencies = verify_historical_execution_audit(
+            remediation_audit,
+            "REMEDIATION",
+            domain,
+            root,
+            remediation_operation,
+            remediation["package_sha256"],
+            remediation["generated_at_epoch"],
+            generated,
+        )
+        remediation_poststate_generated, remediation_poststate_dependencies = verify_historical_remediation_poststate(
+            remediation_poststate,
+            domain,
+            root,
+            remediation_operation,
+            remediation["package_sha256"],
+            isolation_identity,
+            root_device,
+            root_inode,
+            remediation_completed,
+            generated,
+        )
+    else:
+        if remediation_entry["provenance_class"] != "LEGACY_RECONCILED_EXECUTION":
+            fail("legacy historical remediation provenance class mismatch")
+        original_audit_sha256 = digest(
+            remediation_entry["original_execution_audit_sha256"],
+            "historical_lineage.remediation.original_execution_audit_sha256",
+        )
+        reconciliation_path = bound_file(
+            remediation_entry["legacy_reconciliation"],
+            "historical_lineage.remediation.legacy_reconciliation",
+        )
+        reconciliation_review = bound_file(
+            remediation_entry["legacy_reconciliation_review"],
+            "historical_lineage.remediation.legacy_reconciliation_review",
+        )
+        reconciled = verify_legacy_reconciled_execution(
+            reconciliation_path,
+            reconciliation_review,
+            domain,
+            now=generated,
+        )
+        if (
+            reconciled["state"] != "LEGACY_RECONCILED_EXECUTION"
+            or reconciled["root"] != root
+            or reconciled["root_device"] != root_device
+            or reconciled["root_inode"] != root_inode
+            or reconciled["operation_id"] != remediation_operation
+            or reconciled["package_sha256"] != remediation["package_sha256"]
+            or reconciled["isolation_identity_sha256"] != isolation_identity
+            or reconciled["original_audit_sha256"] != original_audit_sha256
+            or reconciled["original_audit_signed_at_execution"] is not False
+            or reconciled["isolation_active"] is not True
+            or reconciled["recurrence"] is not False
+            or reconciled["authority"] is not False
+        ):
+            fail("legacy reconciliation/historical remediation binding mismatch")
+        remediation_completed = reconciled["generated_at_epoch"]
+        remediation_poststate_generated = remediation_completed
+        remediation_audit_dependencies = reconciled["dependencies"]
+        remediation_poststate_dependencies = []
 
     reopen_entry = value["reopen"]
     if not isinstance(reopen_entry, dict):
@@ -1297,6 +1346,9 @@ def verify_historical_execution_lineage(
         "post_open_generated_at_epoch": reopen_completed,
         "recurrence": recurrence,
         "incident_targets_absent": incident_targets_absent,
+        "remediation_provenance_class": (
+            "SIGNED_EXECUTION_AUDIT" if normal_lineage else "LEGACY_RECONCILED_EXECUTION"
+        ),
         "dependencies": [
             str(path), str(review_path), str(remediation_package), str(remediation_review),
             *remediation["dependencies"], *remediation_audit_dependencies,

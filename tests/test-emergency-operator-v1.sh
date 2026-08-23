@@ -508,8 +508,8 @@ lines.append(f'{stamp(start+62)}\tRECONCILIATION_POSTSTATE_VERIFIED recurrence=f
 open(out,'w').write('\n'.join(lines)+'\n')
 PY
 chmod 600 "$legacy_poststate";sign "$legacy_poststate"
-legacy_attestation="$run/legacy-reconciliation.json";legacy_review="$run/legacy-reconciliation-review.json"
-python3 - "$legacy_attestation" "$package" "$review" "$registry" "$legacy_consumption" "$legacy_audit" "$legacy_preserved" "$legacy_poststate" "$legacy_collector" "$domain" "$history_now" <<'PY'
+legacy_attestation="$run/legacy-reconciliation.json";legacy_review="$run/legacy-reconciliation-review.json";legacy_reconciled_at="$((history_now-500))"
+python3 - "$legacy_attestation" "$package" "$review" "$registry" "$legacy_consumption" "$legacy_audit" "$legacy_preserved" "$legacy_poststate" "$legacy_collector" "$domain" "$legacy_reconciled_at" <<'PY'
 import hashlib,json,os,stat,sys
 out,package,review,registry,consumption,audit,preserved,poststate,collector,domain,now=sys.argv[1:]
 def ref(path):return {'path':path,'sha256':hashlib.sha256(open(path,'rb').read()).hexdigest()}
@@ -528,6 +528,50 @@ model,package,domain,now=sys.argv[1:];spec=importlib.util.spec_from_file_locatio
 m.verify_package(pathlib.Path(package),domain,now=int(now),historical_execution=True)
 PY
 mv "$run/consumed.legacy-test" "$run/consumed"
+
+# Closure may consume the explicit legacy reconciliation only through a typed
+# lineage whose remediation branch is visibly classified as legacy.  The
+# normal signed-execution branch remains a different exact-key contract.
+legacy_historical_lineage="$run/legacy-historical-lineage.json"
+python3 - "$legacy_historical_lineage" "$domain" "$history_now" "$package" "$review" "$run/consumed/package-sha256" "$legacy_attestation" "$legacy_review" "$historical_reopen" "$historical_reopen_review" "$run/historical-reopen-consumed/package-sha256" "$reopen_audit" "$postopen" "$postcheck" <<'PY'
+import hashlib,json,sys
+out,domain,now,package,review,consumption,reconciliation,reconciliation_review,reopen,reopen_review,reopen_consumption,reopen_audit,postopen,postcheck=sys.argv[1:]
+ref=lambda path:{'path':path,'sha256':hashlib.sha256(open(path,'rb').read()).hexdigest()};rem=json.load(open(package));rep=json.load(open(reopen));pc=json.load(open(postcheck));rec=json.load(open(reconciliation))
+value={'tool':'wapp-security-emergency-historical-execution-lineage','schema':1,'state':'LEGACY_RECONCILED_EXECUTION_AND_POSTOPEN_VERIFIED_HISTORICAL','domain':domain,'root':rem['site']['root'],'generated_at_epoch':int(now),'isolation_identity_sha256':pc['isolation_identity_sha256'],'remediation':{'package':ref(package),'review':ref(review),'operation_id':rem['operation_id'],'consumption_identity':ref(consumption),'provenance_class':'LEGACY_RECONCILED_EXECUTION','legacy_reconciliation':ref(reconciliation),'legacy_reconciliation_review':ref(reconciliation_review),'original_execution_audit_sha256':rec['original_execution_audit']['sha256']},'reopen':{'package':ref(reopen),'review':ref(reopen_review),'operation_id':rep['reopen_operation_id'],'remediation_operation_id':rem['operation_id'],'remediation_package_sha256':hashlib.sha256(open(package,'rb').read()).hexdigest(),'consumption_identity':ref(reopen_consumption),'execution_audit':ref(reopen_audit),'post_open_verification':ref(postopen)},'authority':False}
+open(out,'w').write(json.dumps(value,sort_keys=True,separators=(',',':'))+'\n')
+PY
+sign "$legacy_historical_lineage";legacy_historical_review="$run/legacy-historical-lineage-review.json";make_review "$legacy_historical_lineage" "$legacy_historical_review"
+legacy_historical_closure="$run/legacy-historical-closure.json"
+python3 - "$historical_closure" "$legacy_historical_closure" "$legacy_historical_lineage" "$legacy_historical_review" <<'PY'
+import hashlib,json,sys
+source,out,lineage,review=sys.argv[1:];ref=lambda path:{'path':path,'sha256':hashlib.sha256(open(path,'rb').read()).hexdigest()};value=json.load(open(source));value['historical_execution']={'lineage':ref(lineage),'review':ref(review)};open(out,'w').write(json.dumps(value,sort_keys=True,separators=(',',':'))+'\n')
+PY
+sign "$legacy_historical_closure"
+python3 "$MODEL" verify-closure --record "$legacy_historical_closure" --domain "$domain" --now-epoch "$history_now" | grep -Fq WORDPRESS_INCIDENT_VERIFIED_CLEAN || fail legacy_reconciled_historical_closure
+pass legacy_reconciled_execution_to_typed_closure
+
+legacy_lineage_variant(){
+  local name="$1" code="$2" out="$run/legacy-lineage-$name.json" review_out="$run/legacy-lineage-$name-review.json" closure_out="$run/legacy-lineage-$name-closure.json"
+  python3 - "$legacy_historical_lineage" "$out" "$code" <<'PY'
+import json,sys
+source,out,code=sys.argv[1:];value=json.load(open(source));exec(code);open(out,'w').write(json.dumps(value,sort_keys=True,separators=(',',':'))+'\n')
+PY
+  sign "$out";make_review "$out" "$review_out"
+  python3 - "$legacy_historical_closure" "$closure_out" "$out" "$review_out" <<'PY'
+import hashlib,json,sys
+source,out,lineage,review=sys.argv[1:];ref=lambda path:{'path':path,'sha256':hashlib.sha256(open(path,'rb').read()).hexdigest()};value=json.load(open(source));value['historical_execution']={'lineage':ref(lineage),'review':ref(review)};open(out,'w').write(json.dumps(value,sort_keys=True,separators=(',',':'))+'\n')
+PY
+  sign "$closure_out";expect_fail "legacy_lineage_$name" python3 "$MODEL" verify-closure --record "$closure_out" --domain "$domain" --now-epoch "$history_now"
+}
+legacy_lineage_variant missing_reconciliation "del value['remediation']['legacy_reconciliation']"
+legacy_lineage_variant wrong_package "value['remediation']['package']['sha256']='9'*64"
+legacy_lineage_variant wrong_operation "value['remediation']['operation_id']='d'*32"
+legacy_lineage_variant wrong_reopen "value['reopen']['remediation_operation_id']='d'*32"
+legacy_lineage_variant wrong_site "value['root']='/home/user_99/app_99'"
+legacy_lineage_variant fake_reconciliation "value['remediation']['legacy_reconciliation']=value['reopen']['execution_audit']"
+legacy_lineage_variant normal_signed_pretence "value['state']='EXECUTED_AND_POSTOPEN_VERIFIED_HISTORICAL'"
+legacy_lineage_variant wrong_provenance_class "value['remediation']['provenance_class']='SIGNED_EXECUTION_AUDIT'"
+legacy_lineage_variant wrong_original_audit_sha "value['remediation']['original_execution_audit_sha256']='8'*64"
 legacy_variant(){
   local name="$1" code="$2" out="$run/legacy-$name.json" out_review="$run/legacy-$name-review.json"
   python3 - "$legacy_attestation" "$out" "$code" <<'PY'
@@ -580,6 +624,7 @@ chmod 600 "$legacy_no_origin_attestation";sign "$legacy_no_origin_attestation";m
 expect_fail legacy_observation_without_origin python3 "$MODEL" verify-legacy-reconciliation --attestation "$legacy_no_origin_attestation" --review "$legacy_no_origin_review" --domain "$domain" --now-epoch "$history_now"
 cp "$legacy_audit" "$run/legacy-audit-backup";printf 'tampered\n' >>"$legacy_audit"
 expect_fail legacy_tampered_original_audit python3 "$MODEL" verify-legacy-reconciliation --attestation "$legacy_attestation" --review "$legacy_review" --domain "$domain" --now-epoch "$history_now"
+expect_fail legacy_lineage_tampered_original_audit python3 "$MODEL" verify-closure --record "$legacy_historical_closure" --domain "$domain" --now-epoch "$history_now"
 mv "$run/legacy-audit-backup" "$legacy_audit"
 pass legacy_reconciled_execution_explicit_weaker_path
 printf 'PASS: Emergency Operator Mode v1 targeted matrix\n'
