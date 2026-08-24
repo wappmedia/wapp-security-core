@@ -38,8 +38,26 @@ import os,pathlib,sys
 loader,artifact,output=map(pathlib.Path,sys.argv[1:])
 raw=loader.read_bytes();marker=b'__WAPP_NATIVE_HELPER_BASE64_PAYLOAD__'
 assert raw.count(marker)==1
+assert b'syscall(319,"wapp-native-displaced-inventory",2)' not in raw
+assert b'syscall(322,$fd,"",$ptr,$env,0x1000)' not in raw
+assert b'my $memfd_name="wapp-native-displaced-inventory";my $fd=syscall(319,$memfd_name,2)' in raw
+assert b'my $empty_path="";syscall(322,$fd,$empty_path,$ptr,$env,0x1000)' in raw
 output.write_bytes(raw.replace(marker,artifact.read_bytes().strip()));output.chmod(0o700)
 PY
+
+# Perl's syscall() forces string arguments to writable scalars. A literal is
+# read-only on the canonical Ubuntu Perl and fails before memfd_create. Keep a
+# direct portability regression before the platform-specific helper checks.
+case "$(uname -s):$(uname -m)" in
+  Darwin:*) perl_getpid=20;;
+  Linux:x86_64) perl_getpid=39;;
+  *) perl_getpid='';;
+esac
+if [[ -n "$perl_getpid" ]];then
+  expect_fail perl_syscall_literal /usr/bin/perl -e 'my $n=shift;syscall($n,"wapp-native-displaced-inventory")' "$perl_getpid"
+  grep -Fq 'Modification of a read-only value attempted' "$TMP/perl_syscall_literal.err"||fail perl_literal_failure_changed
+  /usr/bin/perl -e 'my $n=shift;my $arg="wapp-native-displaced-inventory";my $got=syscall($n,$arg);die "mutable syscall argument failed\n" unless $got==$$' "$perl_getpid"
+fi
 
 if [[ "$(uname -s)" == Darwin ]];then
   /usr/bin/clang -std=c11 -Wall -Wextra -Werror "$SOURCE" -o "$TMP/native-macos"
