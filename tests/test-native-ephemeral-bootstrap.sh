@@ -26,8 +26,8 @@ assert policy['authority']=={'apply':False,'closure':False,'mutation':False,'pre
 assert policy['build_tool']=='zig-0.15.2' and policy['artifact_encoding']=='base64-rfc4648-no-wrap-v1'
 assert re.fullmatch(rb'[A-Za-z0-9+/]+={0,2}\n',encoded)
 binary=base64.b64decode(encoded.strip(),validate=True)
-assert len(encoded)==policy['launcher_encoded_bytes']==47437 and hashlib.sha256(encoded).hexdigest()==policy['launcher_encoded_sha256']=='8558113583050fb20ab84e45f5dbd53ee9f2f88e7909f971c3b326e3ae78f4f8'
-assert len(binary)==policy['launcher_binary_bytes']==35576 and hashlib.sha256(binary).hexdigest()==policy['launcher_binary_sha256']=='140323548884cdbb156d189f5e0b22299dd0ae82ba84d5b3e5f8d16e782eecae'
+assert len(encoded)==policy['launcher_encoded_bytes']==47437 and hashlib.sha256(encoded).hexdigest()==policy['launcher_encoded_sha256']=='e956e371c2090c128f97aab426b9bd942ec3d836dabb6af390b1c1b21b01eff1'
+assert len(binary)==policy['launcher_binary_bytes']==35576 and hashlib.sha256(binary).hexdigest()==policy['launcher_binary_sha256']=='ae64295bd05299f8b35605d6ae3bee6d9a8a06c8da5caa373fc97a8889cba66a'
 for field in ('helper_policy_path','launcher_encoded_path','launcher_source_path','loader_template_path'):
  path=(root/policy[field]).resolve();assert path.is_file() and not path.is_symlink() and str(path).startswith(str(root)+'/')
 PY
@@ -51,8 +51,8 @@ assert '[[ -f "$path"&&! -L "$path"&&-x "$path" ]]' in text
 assert '"$uid" == 0&&"$gid" == 0' in text and '(8#$mode & 022)==0' in text
 assert '"$logical" -ef "$physical"' in text and '"$logical_meta" == "$physical_meta"' in text
 PY
-grep -Fq '#define HELPER_BYTES 75384U' "$SOURCE"||fail helper_size_not_compiled
-grep -Fq '#define HELPER_SHA256 "d073caf84d2674ff8e8dcdec75b4e4862a53498448532687340d2f8718a5c70a"' "$SOURCE"||fail helper_sha_not_compiled
+grep -Fq '#define HELPER_BYTES 84376U' "$SOURCE"||fail helper_size_not_compiled
+grep -Fq '#define HELPER_SHA256 "8a02bd728929c50a201ed3f322dfee1c3bf7cf424c21b13f47b6ab7069c91fb5"' "$SOURCE"||fail helper_sha_not_compiled
 grep -Fq 'SYS_memfd_create' "$SOURCE"&&grep -Fq 'F_ADD_SEALS' "$SOURCE"&&grep -Fq 'SYS_execveat' "$SOURCE"||fail descriptor_launch_contract_missing
 grep -Fq 'stage_parent="${target_root%/*}"' "$LOADER"||fail stage_not_outside_webroot
 grep -Fq 'set -C' "$LOADER"||fail exclusive_create_missing
@@ -109,18 +109,18 @@ mkdir -m 700 -p "$SITE/wp-content/plugins/synthetic"
 printf 'synthetic\n' >"$SITE/wp-content/plugins/synthetic/plugin.php"
 nonce="$(printf positive|sha256sum|awk '{print $1}')";probe="$TMP/probe.sh";build_probe "$LAUNCHER" "$probe"
 before="$(find "$SITE" -print0|sort -z|xargs -0 stat -c '%n:%F:%s:%a:%u:%g:%d:%i'|sha256sum|awk '{print $1}')";out="$TMP/out.tsv"
-/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc "$probe" "$SITE" "$nonce" d073caf84d2674ff8e8dcdec75b4e4862a53498448532687340d2f8718a5c70a 75384 inventory '' >"$out"
+/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc "$probe" "$SITE" "$nonce" 8a02bd728929c50a201ed3f322dfee1c3bf7cf424c21b13f47b6ab7069c91fb5 84376 inventory '' >"$out"
 grep -Fq $'CAPTURE_NONCE\t'"$nonce" "$out"&&grep -Fq 'EPHEMERAL_BOOTSTRAP_AUDIT_V1' "$out"&&grep -Fq 'CLEANUP_VERIFIED' "$out"||fail correct_staged_launcher
 after="$(find "$SITE" -print0|sort -z|xargs -0 stat -c '%n:%F:%s:%a:%u:%g:%d:%i'|sha256sum|awk '{print $1}')";[[ "$before" == "$after" ]]||fail webroot_modified
 [[ ! -e "$ROOT_PARENT/.wapp-security-ephemeral-bootstrap-$nonce" ]]||fail cleanup_not_absent
 
 bad_nonce="$(printf bad|sha256sum|awk '{print $1}')";build_probe "$bad" "$TMP/bad-probe.sh"
-if /bin/bash "$TMP/bad-probe.sh" "$SITE" "$bad_nonce" d073caf84d2674ff8e8dcdec75b4e4862a53498448532687340d2f8718a5c70a 75384 inventory '' >/dev/null 2>&1;then fail hash_mismatch_accepted;fi
+if /bin/bash "$TMP/bad-probe.sh" "$SITE" "$bad_nonce" 8a02bd728929c50a201ed3f322dfee1c3bf7cf424c21b13f47b6ab7069c91fb5 84376 inventory '' >/dev/null 2>&1;then fail hash_mismatch_accepted;fi
 
 collision_nonce="$(printf collision|sha256sum|awk '{print $1}')";mkdir -m 700 "$ROOT_PARENT/.wapp-security-ephemeral-bootstrap-$collision_nonce"
-if /bin/bash "$probe" "$SITE" "$collision_nonce" d073caf84d2674ff8e8dcdec75b4e4862a53498448532687340d2f8718a5c70a 75384 inventory '' >/dev/null 2>&1;then fail preexisting_directory_accepted;fi
+if /bin/bash "$probe" "$SITE" "$collision_nonce" 8a02bd728929c50a201ed3f322dfee1c3bf7cf424c21b13f47b6ab7069c91fb5 84376 inventory '' >/dev/null 2>&1;then fail preexisting_directory_accepted;fi
 rm -rf "$ROOT_PARENT/.wapp-security-ephemeral-bootstrap-$collision_nonce";ln -s "$SITE" "$ROOT_PARENT/.wapp-security-ephemeral-bootstrap-$collision_nonce"
-if /bin/bash "$probe" "$SITE" "$collision_nonce" d073caf84d2674ff8e8dcdec75b4e4862a53498448532687340d2f8718a5c70a 75384 inventory '' >/dev/null 2>&1;then fail symlink_accepted;fi
+if /bin/bash "$probe" "$SITE" "$collision_nonce" 8a02bd728929c50a201ed3f322dfee1c3bf7cf424c21b13f47b6ab7069c91fb5 84376 inventory '' >/dev/null 2>&1;then fail symlink_accepted;fi
 rm "$ROOT_PARENT/.wapp-security-ephemeral-bootstrap-$collision_nonce"
 
 mkdir -m 777 "$TMP/writable-parent";if trusted_directory "$TMP/writable-parent";then fail writable_directory_accepted;fi
