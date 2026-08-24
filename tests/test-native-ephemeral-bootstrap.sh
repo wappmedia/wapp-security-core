@@ -31,6 +31,22 @@ assert len(binary)==policy['launcher_binary_bytes']==35576 and hashlib.sha256(bi
 for field in ('helper_policy_path','launcher_encoded_path','launcher_source_path','loader_template_path'):
  path=(root/policy[field]).resolve();assert path.is_file() and not path.is_symlink() and str(path).startswith(str(root)+'/')
 PY
+python3 - "$LOADER" <<'PY'
+import pathlib,re,sys
+text=pathlib.Path(sys.argv[1]).read_text()
+assignments={name:path for name,path in re.findall(r'^(STAT|OPENSSL|MKDIR|CHMOD|RM|RMDIR)=(/[^\n]+)$',text,re.M)}
+assert assignments=={
+ 'STAT':'/usr/bin/stat','OPENSSL':'/usr/bin/openssl',
+ 'MKDIR':'/bin/mkdir','CHMOD':'/bin/chmod','RM':'/bin/rm','RMDIR':'/bin/rmdir',
+}
+allow='/usr/bin/stat|/usr/bin/openssl|/bin/mkdir|/bin/chmod|/bin/rm|/bin/rmdir'
+assert text.count(allow)==1
+for forbidden in ('/usr/bin/mkdir','/usr/bin/chmod','/usr/bin/rm','/usr/bin/rmdir'):
+ assert forbidden not in text
+assert 'command -v' not in text and 'which ' not in text
+assert '[[ -f "$path"&&! -L "$path"&&-x "$path" ]]' in text
+assert '"$uid" == 0&&"$gid" == 0' in text and '(8#$mode & 022)==0' in text
+PY
 grep -Fq '#define HELPER_BYTES 75384U' "$SOURCE"||fail helper_size_not_compiled
 grep -Fq '#define HELPER_SHA256 "d073caf84d2674ff8e8dcdec75b4e4862a53498448532687340d2f8718a5c70a"' "$SOURCE"||fail helper_sha_not_compiled
 grep -Fq 'SYS_memfd_create' "$SOURCE"&&grep -Fq 'F_ADD_SEALS' "$SOURCE"&&grep -Fq 'SYS_execveat' "$SOURCE"||fail descriptor_launch_contract_missing
@@ -66,12 +82,41 @@ template,launcher,helper,out=sys.argv[1:];raw=open(template,'rb').read();raw=raw
 PY
 }
 
+rewrite_probe_tools(){
+  local source="$1" output="$2" layout="$3" replacement="${4:-}"
+  python3 - "$source" "$output" "$layout" "$replacement" <<'PY'
+import os,pathlib,sys
+source,out,layout,replacement=sys.argv[1:]
+raw=pathlib.Path(source).read_bytes()
+if layout=='usrmerge':
+ for old,new in ((b'/bin/rmdir',b'/usr/bin/rmdir'),(b'/bin/chmod',b'/usr/bin/chmod'),(b'/bin/mkdir',b'/usr/bin/mkdir'),(b'/bin/rm',b'/usr/bin/rm')):
+  raw=raw.replace(old,new)
+elif layout=='replace-mkdir':
+ old=os.environ['WAPP_TEST_MECHANICS_MKDIR'].encode();new=replacement.encode()
+ if raw.count(old)<2:raise SystemExit('test-only mkdir replacement cardinality')
+ raw=raw.replace(old,new)
+else:raise SystemExit('unknown test-only tool layout')
+pathlib.Path(out).write_bytes(raw);os.chmod(out,0o700)
+PY
+}
+
 ROOT_PARENT="$TMP/private-home";SITE="$ROOT_PARENT/site-root"
 mkdir -m 700 -p "$SITE/wp-content/plugins/synthetic"
 printf 'synthetic\n' >"$SITE/wp-content/plugins/synthetic/plugin.php"
 nonce="$(printf positive|sha256sum|awk '{print $1}')";probe="$TMP/probe.sh";build_probe "$LAUNCHER" "$probe"
+mechanics_probe="$probe";mechanics_mkdir=/bin/mkdir
+production_layout=true
+for tool in /usr/bin/stat /usr/bin/openssl /bin/mkdir /bin/chmod /bin/rm /bin/rmdir;do
+  [[ -f "$tool"&&! -L "$tool"&&-x "$tool" ]]||production_layout=false
+done
+[[ -d /bin&&! -L /bin ]]||production_layout=false
+if [[ "$production_layout" != true ]];then
+  if /bin/bash "$probe" "$SITE" "$nonce" d073caf84d2674ff8e8dcdec75b4e4862a53498448532687340d2f8718a5c70a 75384 inventory '' >/dev/null 2>&1;then fail unsupported_bin_layout_not_failclosed;fi
+  mechanics_probe="$TMP/usrmerge-mechanics-probe.sh";rewrite_probe_tools "$probe" "$mechanics_probe" usrmerge
+  mechanics_mkdir=/usr/bin/mkdir
+fi
 before="$(find "$SITE" -print0|sort -z|xargs -0 stat -c '%n:%F:%s:%a:%u:%g:%d:%i'|sha256sum|awk '{print $1}')";out="$TMP/out.tsv"
-/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc "$probe" "$SITE" "$nonce" d073caf84d2674ff8e8dcdec75b4e4862a53498448532687340d2f8718a5c70a 75384 inventory '' >"$out"
+/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc "$mechanics_probe" "$SITE" "$nonce" d073caf84d2674ff8e8dcdec75b4e4862a53498448532687340d2f8718a5c70a 75384 inventory '' >"$out"
 grep -Fq $'CAPTURE_NONCE\t'"$nonce" "$out"&&grep -Fq 'EPHEMERAL_BOOTSTRAP_AUDIT_V1' "$out"&&grep -Fq 'CLEANUP_VERIFIED' "$out"||fail correct_staged_launcher
 after="$(find "$SITE" -print0|sort -z|xargs -0 stat -c '%n:%F:%s:%a:%u:%g:%d:%i'|sha256sum|awk '{print $1}')";[[ "$before" == "$after" ]]||fail webroot_modified
 [[ ! -e "$ROOT_PARENT/.wapp-security-ephemeral-bootstrap-$nonce" ]]||fail cleanup_not_absent
@@ -84,5 +129,16 @@ if /bin/bash "$probe" "$SITE" "$collision_nonce" d073caf84d2674ff8e8dcdec75b4e48
 rm -rf "$ROOT_PARENT/.wapp-security-ephemeral-bootstrap-$collision_nonce";ln -s "$SITE" "$ROOT_PARENT/.wapp-security-ephemeral-bootstrap-$collision_nonce"
 if /bin/bash "$probe" "$SITE" "$collision_nonce" d073caf84d2674ff8e8dcdec75b4e4862a53498448532687340d2f8718a5c70a 75384 inventory '' >/dev/null 2>&1;then fail symlink_accepted;fi
 rm "$ROOT_PARENT/.wapp-security-ephemeral-bootstrap-$collision_nonce"
+
+# Test-only copies rewrite the exact approved mkdir literal in both the fixed
+# assignment and allowlist. Production has no override. This exercises the
+# real symlink/mode gates without modifying host system tools.
+export WAPP_TEST_MECHANICS_MKDIR="$mechanics_mkdir"
+ln -s "$mechanics_mkdir" "$TMP/substituted-mkdir"
+rewrite_probe_tools "$mechanics_probe" "$TMP/symlink-tool-probe.sh" replace-mkdir "$TMP/substituted-mkdir"
+if /bin/bash "$TMP/symlink-tool-probe.sh" "$SITE" "$(printf symlink-tool|sha256sum|awk '{print $1}')" d073caf84d2674ff8e8dcdec75b4e4862a53498448532687340d2f8718a5c70a 75384 inventory '' >/dev/null 2>&1;then fail symlink_tool_accepted;fi
+cp "$mechanics_mkdir" "$TMP/writable-mkdir";chmod 777 "$TMP/writable-mkdir"
+rewrite_probe_tools "$mechanics_probe" "$TMP/writable-tool-probe.sh" replace-mkdir "$TMP/writable-mkdir"
+if /bin/bash "$TMP/writable-tool-probe.sh" "$SITE" "$(printf writable-tool|sha256sum|awk '{print $1}')" d073caf84d2674ff8e8dcdec75b4e4862a53498448532687340d2f8718a5c70a 75384 inventory '' >/dev/null 2>&1;then fail writable_tool_accepted;fi
 
 printf 'PASS: native staged launcher, hash/collision/symlink rejection, exact cleanup and no-webroot-write\n'

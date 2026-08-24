@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Degraded-assurance, operation-bound staging loader for the release-pinned
-# Public Core v1.1.0 native filesystem helper. Only the launcher touches disk.
+# Public Core native filesystem helper. Only the launcher touches disk.
 unset BASH_ENV ENV CDPATH NODE_OPTIONS NODE_PATH NPM_CONFIG_PREFIX PYTHONPATH PYTHONHOME
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 set -eEuo pipefail
@@ -9,21 +9,25 @@ umask 077
 fail(){ printf 'native-ephemeral-loader: %s\n' "$1" >&2;exit 20; }
 STAT=/usr/bin/stat
 OPENSSL=/usr/bin/openssl
-MKDIR=/usr/bin/mkdir
-CHMOD=/usr/bin/chmod
-RM=/usr/bin/rm
-RMDIR=/usr/bin/rmdir
+MKDIR=/bin/mkdir
+CHMOD=/bin/chmod
+RM=/bin/rm
+RMDIR=/bin/rmdir
 LAUNCHER_SHA=140323548884cdbb156d189f5e0b22299dd0ae82ba84d5b3e5f8d16e782eecae
 LAUNCHER_BYTES=35576
 
 meta(){ "$STAT" -c '%u:%g:%a:%d:%i:%s' "$1" 2>/dev/null; }
 trusted_file(){
   local path="$1" value uid gid mode parent
-  [[ "$path" == /usr/bin/*&&-f "$path"&&! -L "$path"&&-x "$path" ]]||return 1
+  case "$path" in
+    /usr/bin/stat|/usr/bin/openssl|/bin/mkdir|/bin/chmod|/bin/rm|/bin/rmdir) ;;
+    *) return 1;;
+  esac
+  [[ -f "$path"&&! -L "$path"&&-x "$path" ]]||return 1
   value="$(meta "$path")"||return 1;IFS=: read -r uid gid mode _ <<<"$value"
   [[ "$uid" == 0&&"$gid" == 0&&"$mode" =~ ^[0-7]{3,4}$ ]]||return 1
   (( (8#$mode & 022)==0 ))||return 1
-  parent=/usr/bin
+  parent="${path%/*}"
   while :;do
     [[ -d "$parent"&&! -L "$parent" ]]||return 1
     value="$(meta "$parent")"||return 1;IFS=: read -r uid gid mode _ <<<"$value"
