@@ -80,6 +80,7 @@ import pathlib,sys
 text=pathlib.Path(sys.argv[1]).read_text();start=text.index('meta(){');end=text.index('\nsha(){',start)
 pathlib.Path(sys.argv[2]).write_text(text[start:end]+'\n')
 PY
+STAT=/usr/bin/stat
 source "$TMP/trust-functions.sh"
 trusted_usrmerge_link "'/bin' -> 'usr/bin'"||fail relative_standard_usrmerge_rejected
 trusted_usrmerge_link "'/bin' -> '/usr/bin'"||fail absolute_standard_usrmerge_rejected
