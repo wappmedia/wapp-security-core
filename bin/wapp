@@ -16,6 +16,7 @@ Usage:
   wapp closure-check DOMAIN
   wapp plugin-policy RECORD.json
   wapp signed-drift-diagnostic create|verify ...
+  wapp volatile-runtime-disposition create|verify|policy-token ...
   wapp product-seal [OUTPUT]
   wapp test
   wapp release-check
@@ -31,6 +32,7 @@ case "$COMMAND" in
   closure-check) exec /bin/bash "$SCRIPT_DIR/wapp-closure-check" "$@" ;;
   plugin-policy) exec /bin/bash "$SCRIPT_DIR/wapp-plugin-policy" "$@" ;;
   signed-drift-diagnostic) exec /bin/bash "$SCRIPT_DIR/wapp-signed-drift-diagnostic" "$@" ;;
+  volatile-runtime-disposition) exec /bin/bash "$SCRIPT_DIR/wapp-volatile-runtime-disposition" "$@" ;;
   product-seal) exec /bin/bash "$SCRIPT_DIR/wapp-product-seal" "$@" ;;
   test) exec /bin/bash "$SCRIPT_DIR/wapp-test" "$@" ;;
   release-check) exec /bin/bash "$SCRIPT_DIR/wapp-release-check" "$@" ;;

@@ -13,6 +13,7 @@ bin/wapp-signed-drift-diagnostic
 bin/wapp-public-data-boundary
 bin/wapp-release-check
 bin/wapp-test
+bin/wapp-volatile-runtime-disposition
 config/canonical-components.txt
 config/native-filesystem-helper.json
 config/native-ephemeral-bootstrap.json
@@ -24,6 +25,7 @@ docs/NATIVE-FILESYSTEM-EVIDENCE-HELPER.md
 lib/emergency-operator-v1.py
 lib/plugin-policy.py
 lib/recovery-integrity.sh
+lib/volatile-runtime-disposition.py
 lib/native-displaced-inventory-loader.sh
 lib/native-displaced-inventory-ephemeral-loader.sh
 lib/native-drift-diagnostic.py
@@ -43,4 +45,5 @@ tests/test-native-drift-diagnostic.sh
 tests/test-native-displaced-inventory-reproducible-build.sh
 tests/test-native-ephemeral-bootstrap.sh
 tests/test-public-data-boundary.sh
+tests/test-volatile-runtime-disposition.sh
 wapp

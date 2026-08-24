@@ -88,6 +88,8 @@ typedef struct { char *storage; char *field[16]; } DiagnosticEntry;
 typedef struct { DiagnosticEntry *v; size_t n,cap; } DiagnosticEntries;
 typedef struct { char *key,*storage; char *field[4]; } DiagnosticIssue;
 typedef struct { DiagnosticIssue *v; size_t n,cap; } DiagnosticIssues;
+typedef struct { char behavior; char *path; int observed; } VolatileRule;
+typedef struct { VolatileRule v[64]; size_t n; } VolatilePolicy;
 static int nibble(char c);
 static unsigned char *decode_hex(const char *text,size_t *outn);
 static int valid_sha(const char *s);
@@ -226,6 +228,52 @@ static const char *diagnostic_change(const DiagnosticEntry *first,const Diagnost
 }
 static int diagnostic_entry_equal(const DiagnosticEntry *first,const DiagnosticEntry *second){for(size_t i=0;i<16;i++)if(strcmp(first->field[i],second->field[i]))return 0;return 1;}
 static const char *diagnostic_value(const DiagnosticEntry *entry,size_t field){return entry?entry->field[field]:"-";}
+static unsigned long long exact_unsigned(const char *text,const char *label){char tail;unsigned long long value;if(sscanf(text,"%llu%c",&value,&tail)!=1)die(label);return value;}
+static long long exact_signed(const char *text,const char *label){char tail;long long value;if(sscanf(text,"%lld%c",&value,&tail)!=1)die(label);return value;}
+static unsigned exact_octal(const char *text,const char *label){char tail;unsigned value;if(sscanf(text,"%o%c",&value,&tail)!=1||value>07777)die(label);return value;}
+static void parse_volatile_policy(const char *token,VolatilePolicy *policy){
+  size_t n=strlen(token);if(!n||n>32768)die("volatile policy token cap");char *copy=strdup(token);if(!copy)die("volatile policy allocation");char *save=NULL;
+  for(char *item=strtok_r(copy,",",&save);item;item=strtok_r(NULL,",",&save)){
+    if(policy->n>=64||strlen(item)<4||item[1]!=':'||(item[0]!='A'&&item[0]!='C'&&item[0]!='L')||!canonical_relhex(item+2))die("volatile policy token invalid");
+    if(policy->n&&strcmp(policy->v[policy->n-1].path,item+2)>=0)die("volatile policy ordering invalid");
+    policy->v[policy->n].behavior=item[0];policy->v[policy->n].path=strdup(item+2);if(!policy->v[policy->n].path)die("volatile policy allocation");policy->n++;
+  }
+  free(copy);if(!policy->n)die("volatile policy empty");
+}
+static void free_volatile_policy(VolatilePolicy *policy){for(size_t i=0;i<policy->n;i++)free(policy->v[i].path);memset(policy,0,sizeof *policy);}
+static VolatileRule *volatile_rule(VolatilePolicy *policy,const char *path){for(size_t i=0;i<policy->n;i++)if(!strcmp(policy->v[i].path,path))return &policy->v[i];return NULL;}
+static int ctime_only(const DiagnosticEntry *a,const DiagnosticEntry *b){for(size_t i=0;i<16;i++)if(i!=9&&strcmp(a->field[i],b->field[i]))return 0;return strcmp(a->field[9],b->field[9])!=0;}
+static int monotonic_log_growth(const DiagnosticEntry *a,const DiagnosticEntry *b){
+  static const size_t stable[]={3,5,6,7,10,11,12,13,15};for(size_t i=0;i<sizeof stable/sizeof stable[0];i++)if(strcmp(a->field[stable[i]],b->field[stable[i]]))return 0;
+  size_t pathn=strlen(a->field[1]),raw_n=0;unsigned char *raw=decode_hex(a->field[1],&raw_n);int suffix=raw&&raw_n>=4&&!memcmp(raw+raw_n-4,".log",4);free(raw);
+  if(!suffix||pathn>8192||strcmp(a->field[3],"REGULAR")||strcmp(a->field[15],"0")||strcmp(b->field[15],"0")||(exact_octal(a->field[5],"volatile mode invalid")&0111))return 0;
+  return exact_unsigned(b->field[4],"volatile size invalid")>exact_unsigned(a->field[4],"volatile size invalid")&&exact_signed(b->field[8],"volatile mtime invalid")>=exact_signed(a->field[8],"volatile mtime invalid")&&exact_signed(b->field[9],"volatile ctime invalid")>=exact_signed(a->field[9],"volatile ctime invalid");
+}
+static void verify_log_prefix(const char *root,const DiagnosticEntry *a,const DiagnosticEntry *b,const char *uploads){
+  if(strcmp(a->field[15],uploads)||strcmp(b->field[15],uploads))die("volatile log location marker invalid");size_t rn=0;unsigned char *rel=decode_hex(a->field[1],&rn);if(!rel)die("volatile log path invalid");
+  int used=0,rootfd=open_root(root,&used),parent=rootfd;struct stat root_before,root_after;if(fstat(rootfd,&root_before)<0)die("volatile upload root identity unavailable");size_t start=0;char name[4097]={0};
+  for(size_t i=0;i<=rn;i++)if(i==rn||rel[i]=='/'){size_t n=i-start;if(!is_safe_component(rel+start,n)||n>=sizeof name)die("volatile upload path component invalid");memcpy(name,rel+start,n);name[n]=0;if(i<rn){int next=open_component(parent,name,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_NOATIME|O_CLOEXEC,&used);if(next<0)die("volatile upload parent traversal failed");if(parent!=rootfd)close(parent);parent=next;}start=i+1;}
+  int fd=open_component(parent,name,O_RDONLY|O_NOFOLLOW|O_NOATIME|O_CLOEXEC,&used);struct stat opened,after,pathst;if(fd<0||fstat(fd,&opened)<0||!S_ISREG(opened.st_mode)||opened.st_dev!=(dev_t)exact_unsigned(b->field[10],"volatile upload device invalid")||opened.st_ino!=(ino_t)exact_unsigned(b->field[11],"volatile upload inode invalid")||(unsigned)(opened.st_mode&07777)!=exact_octal(b->field[5],"volatile upload mode invalid")||(opened.st_mode&0111)||opened.st_uid!=(uid_t)exact_unsigned(b->field[6],"volatile upload uid invalid")||opened.st_gid!=(gid_t)exact_unsigned(b->field[7],"volatile upload gid invalid")||opened.st_nlink!=(nlink_t)exact_unsigned(b->field[12],"volatile upload nlink invalid")||(unsigned long long)opened.st_size!=exact_unsigned(b->field[4],"volatile upload size invalid")||ns_time(opened.st_mtim)!=exact_signed(b->field[8],"volatile upload mtime invalid")||ns_time(opened.st_ctim)!=exact_signed(b->field[9],"volatile upload ctime invalid"))die("volatile upload current identity mismatch");
+  unsigned long long prefix=exact_unsigned(a->field[4],"volatile upload prefix size invalid");Sha256 sh;sha_init(&sh);unsigned char *buf=xmalloc(IO_CHUNK);unsigned long long total=0;while(total<prefix){size_t want=(size_t)((prefix-total)>IO_CHUNK?IO_CHUNK:(prefix-total));ssize_t got=read(fd,buf,want);if(got<=0)die("volatile upload prefix read failed");sha_update(&sh,buf,(size_t)got);total+=(unsigned long long)got;}free(buf);unsigned char hash[32];char actual[65];sha_final(&sh,hash);hex32(hash,actual);
+  if(strcmp(actual,a->field[14])||fstat(fd,&after)<0||fstatat(parent,name,&pathst,AT_SYMLINK_NOFOLLOW)<0||fstat(rootfd,&root_after)<0||!same_stat(&opened,&after)||!same_stat(&after,&pathst)||!same_stat(&root_before,&root_after))die("volatile upload append-prefix proof failed");
+  close(fd);if(parent!=rootfd)close(parent);close(rootfd);free(rel);
+}
+static char *volatile_inventory(const char *root,const char *first_text,const char *second_text,const char *nonce,const char *policy_token){
+  DiagnosticEntries first={0},second={0};DiagnosticIssues first_issues={0},second_issues={0};char root1[11][8193]={{0}},root2[11][8193]={{0}},runtime1[5][1025]={{0}},runtime2[5][1025]={{0}};VolatilePolicy policy={0};
+  parse_diagnostic_snapshot(first_text,&first,&first_issues,root1,runtime1);parse_diagnostic_snapshot(second_text,&second,&second_issues,root2,runtime2);parse_volatile_policy(policy_token,&policy);
+  if(strcmp(root1[1],root2[1])||strcmp(root1[3],root2[3])||strcmp(root1[4],root2[4])||strcmp(runtime1[1],runtime2[1])||strcmp(runtime1[2],runtime2[2])||strcmp(runtime1[3],runtime2[3])||strcmp(runtime1[4],runtime2[4]))die("volatile inventory identity mismatch");
+  if(first_issues.n||second_issues.n)die("volatile inventory unresolved evidence");
+  size_t i=0,j=0;while(i<first.n||j<second.n){DiagnosticEntry *a=i<first.n?&first.v[i]:NULL,*b=j<second.n?&second.v[j]:NULL;int order=a&&b?strcmp(a->field[1],b->field[1]):(a?-1:1);
+    if(order!=0)die("volatile inventory create/delete event");VolatileRule *rule=volatile_rule(&policy,a->field[1]);if(!diagnostic_entry_equal(a,b)){if(!rule)die("volatile inventory unclassified drift");if(rule->behavior=='C'&&(!ctime_only(a,b)||(exact_octal(a->field[5],"volatile mode invalid")&0111)||(exact_octal(b->field[5],"volatile mode invalid")&0111)))die("volatile inventory behavior mismatch");if(rule->behavior=='L'){if(!monotonic_log_growth(a,b))die("volatile log behavior mismatch");verify_log_prefix(root,a,b,"0");}if(rule->behavior=='A'){if(!monotonic_log_growth(a,b))die("volatile upload behavior mismatch");verify_log_prefix(root,a,b,"1");}rule->observed=1;}else if(rule){if(strcmp(a->field[3],"REGULAR")||(exact_octal(a->field[5],"volatile mode invalid")&0111)||(rule->behavior=='A'?strcmp(a->field[15],"1"):strcmp(a->field[15],"0")))die("volatile stable target invalid");rule->observed=0;}i++;j++;
+  }
+  for(size_t k=0;k<policy.n;k++){DiagnosticEntry *found=NULL;for(size_t x=0;x<second.n;x++)if(!strcmp(second.v[x].field[1],policy.v[k].path)){found=&second.v[x];break;}if(!found)die("volatile policy target missing");}
+  char token_sha[65];digest(policy_token,strlen(policy_token),token_sha);Lines output={0};lines_add(&output,fmt_alloc("CAPTURE_NONCE\t%s",nonce));
+  char *copy=strdup(second_text);if(!copy)die("volatile inventory allocation");char *save=NULL;for(char *line=strtok_r(copy,"\n",&save);line;line=strtok_r(NULL,"\n",&save))lines_add(&output,strdup(line));free(copy);
+  lines_add(&output,fmt_alloc("VOLATILE_RUNTIME_CANDIDATE\tBOUNDED_VOLATILE_RUNTIME_CANDIDATE_V1\t%s\t%zu\tVISIBLE\tUNVERIFIED_NON_AUTHORIZING",token_sha,policy.n));
+  for(size_t k=0;k<policy.n;k++)lines_add(&output,fmt_alloc("VOLATILE_RUNTIME_CANDIDATE_PATH\t%s\t%s\t%s",policy.v[k].path,policy.v[k].behavior=='C'?"CTIME_ONLY":policy.v[k].behavior=='A'?"APPEND_PREFIX_VERIFIED_UPLOAD_LOG_GROWTH":"APPEND_PREFIX_VERIFIED_LOG_GROWTH",policy.v[k].observed?"OBSERVED_DRIFT":"OBSERVED_STABLE"));
+  size_t total=1;for(size_t k=0;k<output.n;k++)total+=strlen(output.v[k])+1;if(total>MAX_OUTPUT_BYTES)die("volatile inventory serialized output cap");char *serialized=xmalloc(total),*cursor=serialized;for(size_t k=0;k<output.n;k++){size_t n=strlen(output.v[k]);memcpy(cursor,output.v[k],n);cursor+=n;*cursor++='\n';}*cursor=0;
+  lines_free(&output);free_volatile_policy(&policy);diagnostic_entries_free(&first);diagnostic_entries_free(&second);diagnostic_issues_free(&first_issues);diagnostic_issues_free(&second_issues);return serialized;
+}
 static char *diagnostic_delta(const char *first_text,const char *second_text,const char *nonce,const char *helper_sha,const char *runtime_identity){
   if(!strcmp(first_text,second_text))die("diagnostic mode requires two-pass mismatch");
   DiagnosticEntries first={0},second={0};DiagnosticIssues first_issues={0},second_issues={0};char root1[11][8193]={{0}},root2[11][8193]={{0}},runtime1[5][1025]={{0}},runtime2[5][1025]={{0}};
@@ -321,6 +369,7 @@ int main(int argc,char **argv){
   apply_process_limits();if((argc!=7&&argc!=8)||!valid_root(argv[2])||!valid_nonce(argv[3])||!valid_sha(argv[4])||strlen(argv[5])>512)die("invalid bounded invocation");verify_self_fd(argv[6],argv[4]);
   if(argc==7&&!strcmp(argv[1],"inventory")){char *first=snapshot(argv[2],argv[4],argv[5]);char *second=snapshot(argv[2],argv[4],argv[5]);if(strcmp(first,second))die("inventory drift between passes");printf("CAPTURE_NONCE\t%s\n%s",argv[3],first);free(first);free(second);return 0;}
   if(argc==7&&!strcmp(argv[1],"diagnostic")){char *first=snapshot(argv[2],argv[4],argv[5]);char *second=snapshot(argv[2],argv[4],argv[5]);char *delta=diagnostic_delta(first,second,argv[3],argv[4],argv[5]);fputs(delta,stdout);free(delta);free(first);free(second);return 0;}
+  if(argc==8&&!strcmp(argv[1],"volatile-inventory")){char *first=snapshot(argv[2],argv[4],argv[5]);char *second=snapshot(argv[2],argv[4],argv[5]);char *inventory=volatile_inventory(argv[2],first,second,argv[3],argv[7]);fputs(inventory,stdout);free(inventory);free(first);free(second);return 0;}
   if(argc==8&&!strcmp(argv[1],"rollback")){char *first=selected_snapshot(argv[2],argv[7],argv[4],argv[5]);char *second=selected_snapshot(argv[2],argv[7],argv[4],argv[5]);if(strcmp(first,second))die("selected target drift between passes");printf("CAPTURE_NONCE\t%s\n%s",argv[3],first);free(first);free(second);return 0;}
   die("unsupported bounded mode");return 20;
 }

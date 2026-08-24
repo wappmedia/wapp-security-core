@@ -19,8 +19,8 @@ int main(void) {
 }
 #else
 
-#define HELPER_BYTES 84376U
-#define HELPER_SHA256 "8a02bd728929c50a201ed3f322dfee1c3bf7cf424c21b13f47b6ab7069c91fb5"
+#define HELPER_BYTES 92824U
+#define HELPER_SHA256 "107feade2363ec810517f4e0796aad576f0966822e514acb0749df6dce13c41b"
 
 typedef struct { uint32_t h[8]; uint64_t bits; unsigned char block[64]; size_t used; } Sha256;
 static const uint32_t K[64] = {
@@ -43,14 +43,16 @@ static void die(const char *m){fprintf(stderr,"wapp-ephemeral-memfd-launcher: %s
 static int safe_text(const char *s,size_t cap){size_t n=strlen(s);if(!n||n>cap)return 0;for(size_t i=0;i<n;i++){unsigned char c=(unsigned char)s[i];if(c<0x21||c>0x7e)return 0;}return 1;}
 static int valid_root(const char *p){if(!p||p[0]!='/'||p[1]=='\0'||strlen(p)>4096||p[strlen(p)-1]=='/'||strstr(p,"//"))return 0;for(const char *s=p+1;*s;){const char *e=strchr(s,'/');size_t n=e?(size_t)(e-s):strlen(s);if(!n||(n==1&&s[0]=='.')||(n==2&&s[0]=='.'&&s[1]=='.'))return 0;if(!e)break;s=e+1;}return 1;}
 static int valid_hex(const char *s,size_t n){if(strlen(s)!=n)return 0;for(size_t i=0;i<n;i++)if(!((s[i]>='0'&&s[i]<='9')||(s[i]>='a'&&s[i]<='f')))return 0;return 1;}
+static int valid_volatile_policy(const char *s){size_t n=strlen(s),items=0,start=0;if(!n||n>32768)return 0;for(size_t i=0;i<=n;i++)if(i==n||s[i]==','){size_t length=i-start;if(++items>64||length<4||(s[start]!='A'&&s[start]!='C'&&s[start]!='L')||s[start+1]!=':'||((length-2)&1))return 0;for(size_t j=start+2;j<i;j++)if(!((s[j]>='0'&&s[j]<='9')||(s[j]>='a'&&s[j]<='f')))return 0;start=i+1;}return 1;}
 static void write_all(int fd,const unsigned char *p,size_t n){size_t off=0;while(off<n){ssize_t got=write(fd,p+off,n-off);if(got<0&&errno==EINTR)continue;if(got<=0)die("memfd write failed");off+=(size_t)got;}}
 
 int main(int argc,char **argv){
-  if((argc!=5&&argc!=6)||((!strcmp(argv[1],"inventory")||!strcmp(argv[1],"diagnostic"))&&argc!=5)||(!strcmp(argv[1],"rollback")&&argc!=6))die("invalid bounded invocation");
-  if(strcmp(argv[1],"inventory")&&strcmp(argv[1],"diagnostic")&&strcmp(argv[1],"rollback"))die("invalid bounded mode");
+  if((argc!=5&&argc!=6)||((!strcmp(argv[1],"inventory")||!strcmp(argv[1],"diagnostic"))&&argc!=5)||((!strcmp(argv[1],"rollback")||!strcmp(argv[1],"volatile-inventory"))&&argc!=6))die("invalid bounded invocation");
+  if(strcmp(argv[1],"inventory")&&strcmp(argv[1],"diagnostic")&&strcmp(argv[1],"rollback")&&strcmp(argv[1],"volatile-inventory"))die("invalid bounded mode");
   if(!valid_root(argv[2])||!valid_hex(argv[3],64)||!safe_text(argv[4],512))die("invalid bounded identity");
   if(strstr(argv[4],"loader=DEGRADED_ASSURANCE_EPHEMERAL_BOOTSTRAP_V1|")!=argv[4]||!strstr(argv[4],"|helper_sha=" HELPER_SHA256 "|transport=sealed_memfd_execveat_v1"))die("runtime identity contract");
-  if(argc==6&&(!valid_hex(argv[5],strlen(argv[5]))||strlen(argv[5])<2||strlen(argv[5])>8192||strlen(argv[5])%2))die("invalid selected target");
+  if(argc==6&&!strcmp(argv[1],"rollback")&&(!valid_hex(argv[5],strlen(argv[5]))||strlen(argv[5])<2||strlen(argv[5])>8192||strlen(argv[5])%2))die("invalid selected target");
+  if(argc==6&&!strcmp(argv[1],"volatile-inventory")&&!valid_volatile_policy(argv[5]))die("invalid volatile policy");
   struct rlimit files={64,64},memory={256U*1024U*1024U,256U*1024U*1024U};if(setrlimit(RLIMIT_NOFILE,&files)<0||setrlimit(RLIMIT_AS,&memory)<0)die("process limits unavailable");
   unsigned char *raw=malloc(HELPER_BYTES+1U);if(!raw)die("allocation failed");size_t used=0;for(;;){ssize_t n=read(STDIN_FILENO,raw+used,HELPER_BYTES+1U-used);if(n<0&&errno==EINTR)continue;if(n<0)die("helper read failed");if(n==0)break;used+=(size_t)n;if(used>HELPER_BYTES)die("helper byte cap");}if(used!=HELPER_BYTES)die("helper byte count mismatch");
   Sha256 sh;unsigned char digest[32];char actual[65];init(&sh);update(&sh,raw,used);finish(&sh,digest);hex32(digest,actual);if(strcmp(actual,HELPER_SHA256))die("helper SHA-256 mismatch");

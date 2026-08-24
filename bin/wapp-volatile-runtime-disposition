@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.."&&pwd)"
+MODEL="$ROOT/lib/volatile-runtime-disposition.py"
+source "$ROOT/lib/recovery-integrity.sh"
+fail(){ printf 'volatile-runtime-disposition: %s\n' "$1" >&2;exit 20; }
+PYTHON="$(recovery_trusted_fixed_python)"||fail 'trusted local Python unavailable'
+signed(){ [[ "$1" == /* ]]&&recovery_verify_file "$1" "$1.hmac"; }
+
+case "${1:-}" in
+  create)
+    [[ $# -eq 11&&"${2:-}" == --diagnostic-one&&"${4:-}" == --diagnostic-two&&"${6:-}" == --runtime-provenance&&"${8:-}" == --issued-at&&"${10:-}" == --output ]]||fail 'invalid create invocation'
+    first="$3";second="$5";provenance="$7";issued="$9";output="${11}"
+    [[ "$first" == /*&&"$second" == /*&&"$provenance" == /*&&"$output" == /*&&! -e "$output"&&! -L "$output"&&! -e "$output.hmac"&&! -L "$output.hmac" ]]||fail 'invalid absolute input/output'
+    signed "$first"||fail 'first diagnostic signature invalid';signed "$second"||fail 'second diagnostic signature invalid';signed "$provenance"||fail 'runtime provenance signature invalid'
+    "$ROOT/bin/wapp-signed-drift-diagnostic" verify --artifact "$first" >/dev/null||fail 'first diagnostic invalid'
+    "$ROOT/bin/wapp-signed-drift-diagnostic" verify --artifact "$second" >/dev/null||fail 'second diagnostic invalid'
+    tmp="$(mktemp -d 2>/dev/null||mktemp -d -t wapp-volatile-runtime)";trap 'rm -rf "$tmp"' EXIT
+    PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$MODEL" create "$first" "$second" "$provenance" "$issued" "$tmp/artifact.json"||fail 'disposition derivation failed'
+    recovery_sign_file "$tmp/artifact.json" "$tmp/artifact.json.hmac" >/dev/null||fail 'disposition signing failed'
+    mv "$tmp/artifact.json" "$output";mv "$tmp/artifact.json.hmac" "$output.hmac";trap - EXIT;rmdir "$tmp"
+    printf 'BOUNDED_VOLATILE_RUNTIME_DISPOSITION_CREATED: %s\n' "$output"
+    ;;
+  verify|policy-token)
+    [[ $# -eq 3&&"${2:-}" == --artifact&&"${3:-}" == /* ]]||fail 'invalid invocation'
+    artifact="$3";signed "$artifact"||fail 'disposition signature invalid'
+    dependencies="$(PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$MODEL" dependencies "$artifact")"||fail 'dependency binding invalid'
+    count=0
+    while IFS= read -r dependency;do [[ -n "$dependency" ]]||continue;count=$((count+1));signed "$dependency"||fail 'signed dependency invalid';if [[ $count -le 2 ]];then "$ROOT/bin/wapp-signed-drift-diagnostic" verify --artifact "$dependency" >/dev/null||fail 'diagnostic dependency invalid';fi;done <<<"$dependencies"
+    [[ $count -eq 3 ]]||fail 'dependency cardinality invalid'
+    if [[ "$1" == policy-token ]];then PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$MODEL" policy-token "$artifact";else PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$MODEL" verify "$artifact";fi
+    ;;
+  inventory-create)
+    [[ $# -eq 7&&"${2:-}" == --raw-candidate&&"${4:-}" == --disposition&&"${6:-}" == --output ]]||fail 'invalid inventory create invocation'
+    candidate="$3";disposition="$5";output="$7"
+    [[ "$candidate" == /*&&"$disposition" == /*&&"$output" == /*&&! -e "$output"&&! -L "$output"&&! -e "$output.hmac"&&! -L "$output.hmac" ]]||fail 'invalid inventory input/output'
+    signed "$disposition"||fail 'disposition signature invalid'
+    "$0" policy-token --artifact "$disposition" >/dev/null||fail 'disposition is not current'
+    tmp="$(mktemp -d 2>/dev/null||mktemp -d -t wapp-volatile-runtime-inventory)";trap 'rm -rf "$tmp"' EXIT
+    PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$MODEL" inventory-create "$candidate" "$disposition" "$tmp/artifact.json"||fail 'volatile inventory binding failed'
+    recovery_sign_file "$tmp/artifact.json" "$tmp/artifact.json.hmac" >/dev/null||fail 'volatile inventory signing failed'
+    mv "$tmp/artifact.json" "$output";mv "$tmp/artifact.json.hmac" "$output.hmac";trap - EXIT;rmdir "$tmp"
+    printf 'BOUNDED_VOLATILE_RUNTIME_INVENTORY_CREATED: %s\n' "$output"
+    ;;
+  inventory-verify)
+    [[ $# -eq 3&&"${2:-}" == --artifact&&"${3:-}" == /* ]]||fail 'invalid inventory verify invocation'
+    artifact="$3";signed "$artifact"||fail 'volatile inventory signature invalid'
+    dependencies="$(PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$MODEL" inventory-dependencies "$artifact")"||fail 'volatile inventory dependency binding invalid'
+    count=0
+    while IFS= read -r dependency;do [[ -n "$dependency" ]]||continue;count=$((count+1));if [[ $count -eq 2 ]];then signed "$dependency"||fail 'signed disposition dependency invalid';"$0" verify --artifact "$dependency" >/dev/null||fail 'disposition dependency invalid';fi;done <<<"$dependencies"
+    [[ $count -eq 2 ]]||fail 'volatile inventory dependency cardinality invalid'
+    PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$MODEL" inventory-verify "$artifact"
+    ;;
+  *) fail 'usage: wapp-volatile-runtime-disposition create|verify|policy-token|inventory-create|inventory-verify';;
+esac

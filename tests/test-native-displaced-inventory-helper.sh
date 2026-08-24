@@ -18,12 +18,13 @@ for path in "$SOURCE" "$ARTIFACT" "$POLICY" "$LOADER";do [[ -f "$path"&&! -L "$p
 import base64,hashlib,json,pathlib,sys
 policy,artifact,output=map(pathlib.Path,sys.argv[1:])
 value=json.loads(policy.read_text(encoding='utf-8'))
-expected={'tool','schema','platform','runtime_mode','loader_path','encoded_path','encoded_sha256','encoded_bytes','binary_sha256','binary_bytes','artifact_encoding','build_tool','root_contract','capture_modes','diagnostic_contract'}
-assert set(value)==expected and value['tool']=='wapp-security-native-filesystem-helper-policy' and value['schema']==2
+expected={'tool','schema','platform','runtime_mode','loader_path','encoded_path','encoded_sha256','encoded_bytes','binary_sha256','binary_bytes','artifact_encoding','build_tool','root_contract','capture_modes','diagnostic_contract','volatile_runtime_contract'}
+assert set(value)==expected and value['tool']=='wapp-security-native-filesystem-helper-policy' and value['schema']==3
 assert value['platform']=='linux-x86_64' and value['loader_path']=='/usr/bin/perl'
 assert value['runtime_mode']=='PRODUCTION_RELEASE_PINNED_NATIVE_LINUX_X86_64_MEMFD_V1'
 assert value['root_contract']=='PROVIDER_NEUTRAL_ABSOLUTE_DESCRIPTOR_ROOT_V1'
-assert value['capture_modes']==['diagnostic','inventory','rollback'] and value['diagnostic_contract']=='SIGNED_DRIFT_DIAGNOSTIC_MODE_V1'
+assert value['capture_modes']==['diagnostic','inventory','rollback','volatile-inventory'] and value['diagnostic_contract']=='SIGNED_DRIFT_DIAGNOSTIC_MODE_V1'
+assert value['volatile_runtime_contract']=='BOUNDED_VOLATILE_RUNTIME_DISPOSITION_V1'
 assert value['encoded_path']=='libexec/wapp-native-displaced-inventory-linux-x86_64.b64.txt'
 assert value['artifact_encoding']=='base64-rfc4648-no-wrap-v1' and value['build_tool']=='zig-0.15.2'
 encoded=artifact.read_bytes();raw=base64.b64decode(encoded.strip(),validate=True)
@@ -56,7 +57,7 @@ marker='my $memfd_name="wapp-native-displaced-inventory";'
 assert body.count(marker)==1
 body=body.split(marker,1)[0]+r'''use Scalar::Util qw(tainted);
 my $memfd_name="wapp-native-displaced-inventory";my $empty_path="";
-my @args=("wapp-native-displaced-inventory",$mode,$root,$nonce,$expected,$identity,"7");push @args,$selected if $mode eq "rollback";my @hold=map "$_\0",@args;my $ptr="";$ptr.=pack("p",$_) for @hold;$ptr.=pack("J",0);my $env=pack("J",0);
+my @args=("wapp-native-displaced-inventory",$mode,$root,$nonce,$expected,$identity,"7");push @args,$selected if $mode eq "rollback"||$mode eq "volatile-inventory";my @hold=map "$_\0",@args;my $ptr="";$ptr.=pack("p",$_) for @hold;$ptr.=pack("J",0);my $env=pack("J",0);
 die "tainted validated syscall input\n" if grep {tainted($_)} ($memfd_name,$empty_path,$ptr,$env,@hold);
 print "TAINT_CONTRACT_PASS\n";
 '''
@@ -194,5 +195,29 @@ assert not any('before' in line or 'after' in line for line in lines)
 PY
 expect_fail stable_diagnostic /bin/bash "$TMP/probe" "$TEST_ROOT" "$NONCE" "$BINARY_SHA" "$BINARY_BYTES" diagnostic ''
 run_inventory >"$TMP/post-drift-stable.tsv"
+
+# A disposition-aware inventory keeps every path visible and accepts only the
+# exact bounded metadata behavior encoded by the already verified policy token.
+printf 'log-before\n' >"$TEST_ROOT/a-runtime.log";printf 'runtime-state\n' >"$TEST_ROOT/b-runtime.php"
+chmod 0644 "$TEST_ROOT/a-runtime.log" "$TEST_ROOT/b-runtime.php"
+LOG_HEX="$(python3 -c 'print(b"a-runtime.log".hex())')";STATE_HEX="$(python3 -c 'print(b"b-runtime.php".hex())')";VOLATILE_POLICY="L:$LOG_HEX,C:$STATE_HEX"
+(
+  sleep 0.2
+  printf 'log-after\n' >>"$TEST_ROOT/a-runtime.log"
+  chmod 0644 "$TEST_ROOT/b-runtime.php"
+) & volatile_mutator=$!
+/bin/bash "$TMP/probe" "$TEST_ROOT" "$NONCE" "$BINARY_SHA" "$BINARY_BYTES" volatile-inventory "$VOLATILE_POLICY" >"$TMP/volatile.tsv"
+wait "$volatile_mutator"
+/usr/bin/python3 - "$TMP/volatile.tsv" "$LOG_HEX" "$STATE_HEX" "$VOLATILE_POLICY" <<'PY'
+import hashlib,sys
+lines=open(sys.argv[1],encoding='ascii').read().splitlines();assert lines[0].startswith('CAPTURE_NONCE\t')
+assert any(line.startswith('ENTRY\t'+sys.argv[2]+'\t') for line in lines)
+assert any(line.startswith('ENTRY\t'+sys.argv[3]+'\t') for line in lines)
+summary=[line.split('\t') for line in lines if line.startswith('VOLATILE_RUNTIME_CANDIDATE\t')];assert len(summary)==1
+assert summary[0][1:] == ['BOUNDED_VOLATILE_RUNTIME_CANDIDATE_V1',hashlib.sha256(sys.argv[4].encode()).hexdigest(),'2','VISIBLE','UNVERIFIED_NON_AUTHORIZING']
+assert 'VOLATILE_RUNTIME_CANDIDATE_PATH\t'+sys.argv[2]+'\tAPPEND_PREFIX_VERIFIED_LOG_GROWTH\tOBSERVED_DRIFT' in lines
+assert 'VOLATILE_RUNTIME_CANDIDATE_PATH\t'+sys.argv[3]+'\tCTIME_ONLY\tOBSERVED_DRIFT' in lines
+PY
+expect_fail arbitrary_volatile_path /bin/bash "$TMP/probe" "$TEST_ROOT" "$NONCE" "$BINARY_SHA" "$BINARY_BYTES" volatile-inventory "L:$LOG_HEX,C:$STATE_HEX,C:757365722d61646465642e6c6f67"
 rm "$TEST_ROOT/z-drift-slow.bin"
 printf 'PASS: provider-neutral native helper enforces descriptor/no-follow/no-atime/two-pass/rollback contracts\n'
