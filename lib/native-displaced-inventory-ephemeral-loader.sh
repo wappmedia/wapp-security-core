@@ -17,23 +17,66 @@ LAUNCHER_SHA=140323548884cdbb156d189f5e0b22299dd0ae82ba84d5b3e5f8d16e782eecae
 LAUNCHER_BYTES=35576
 
 meta(){ "$STAT" -c '%u:%g:%a:%d:%i:%s' "$1" 2>/dev/null; }
-trusted_file(){
-  local path="$1" value uid gid mode parent
-  case "$path" in
-    /usr/bin/stat|/usr/bin/openssl|/bin/mkdir|/bin/chmod|/bin/rm|/bin/rmdir) ;;
-    *) return 1;;
-  esac
-  [[ -f "$path"&&! -L "$path"&&-x "$path" ]]||return 1
-  value="$(meta "$path")"||return 1;IFS=: read -r uid gid mode _ <<<"$value"
+trusted_metadata(){
+  local value="$1" uid gid mode
+  IFS=: read -r uid gid mode _ <<<"$value"
   [[ "$uid" == 0&&"$gid" == 0&&"$mode" =~ ^[0-7]{3,4}$ ]]||return 1
   (( (8#$mode & 022)==0 ))||return 1
+}
+trusted_directory(){
+  local path="$1" value
+  [[ -d "$path"&&! -L "$path" ]]||return 1
+  value="$(meta "$path")"||return 1
+  trusted_metadata "$value"
+}
+trusted_physical_file(){
+  local path="$1" value parent
+  [[ -f "$path"&&! -L "$path"&&-x "$path" ]]||return 1
+  value="$(meta "$path")"||return 1
+  trusted_metadata "$value"||return 1
   parent="${path%/*}"
   while :;do
-    [[ -d "$parent"&&! -L "$parent" ]]||return 1
-    value="$(meta "$parent")"||return 1;IFS=: read -r uid gid mode _ <<<"$value"
-    [[ "$uid" == 0&&"$gid" == 0&&"$mode" =~ ^[0-7]{3,4}$ ]]&&(( (8#$mode & 022)==0 ))||return 1
+    trusted_directory "$parent"||return 1
     [[ "$parent" == / ]]&&break;parent="${parent%/*}";[[ -n "$parent" ]]||parent=/
   done
+}
+trusted_usrmerge_link(){
+  case "$1" in
+    "'/bin' -> 'usr/bin'"|"'/bin' -> '/usr/bin'") return 0;;
+    *) return 1;;
+  esac
+}
+trusted_usrmerge_tool(){
+  local logical="$1" physical description logical_meta physical_meta bin_meta uid gid _
+  case "$logical" in
+    /bin/mkdir) physical=/usr/bin/mkdir;;
+    /bin/chmod) physical=/usr/bin/chmod;;
+    /bin/rm) physical=/usr/bin/rm;;
+    /bin/rmdir) physical=/usr/bin/rmdir;;
+    *) return 1;;
+  esac
+  [[ -L /bin ]]||return 1
+  description="$(LC_ALL=C QUOTING_STYLE=shell-always "$STAT" -c '%N' -- /bin 2>/dev/null)"||return 1
+  trusted_usrmerge_link "$description"||return 1
+  bin_meta="$(meta /bin)"||return 1;IFS=: read -r uid gid _ <<<"$bin_meta"
+  [[ "$uid" == 0&&"$gid" == 0 ]]||return 1
+  trusted_directory /||return 1
+  trusted_directory /usr||return 1
+  trusted_directory /usr/bin||return 1
+  trusted_physical_file "$physical"||return 1
+  [[ -f "$logical"&&! -L "$logical"&&-x "$logical"&&"$logical" -ef "$physical" ]]||return 1
+  logical_meta="$(meta "$logical")"||return 1;physical_meta="$(meta "$physical")"||return 1
+  [[ "$logical_meta" == "$physical_meta" ]]||return 1
+}
+trusted_file(){
+  local path="$1"
+  case "$path" in
+    /usr/bin/stat|/usr/bin/openssl) trusted_physical_file "$path";;
+    /bin/mkdir|/bin/chmod|/bin/rm|/bin/rmdir)
+      if [[ -d /bin&&! -L /bin ]];then trusted_physical_file "$path";else trusted_usrmerge_tool "$path";fi
+      ;;
+    *) return 1;;
+  esac
 }
 sha(){
   local value
