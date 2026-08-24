@@ -29,6 +29,8 @@ waf_path='wp-content/wflogs/config-livewaf.php';waf_hex="$(printf %s "$waf_path"
 uploads_root_hex="$(printf %s 'wp-content/uploads/wc-logs'|/usr/bin/xxd -p -c 9999)"
 waf_root_hex="$(printf %s 'wp-content/wflogs'|/usr/bin/xxd -p -c 9999)"
 helper_sha="$(/usr/bin/python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["binary_sha256"])' "$POLICY")"
+launcher_sha="$(/usr/bin/python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["launcher_binary_sha256"])' "$ROOT/config/native-ephemeral-bootstrap.json")"
+launcher_bytes="$(/usr/bin/python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["launcher_binary_bytes"])' "$ROOT/config/native-ephemeral-bootstrap.json")"
 runtime_identity="loader=/usr/bin/perl|loader_sha=$(sha_text perl)|loader_meta=0:0:755:1:2:3|helper_sha=$helper_sha|transport=sealed_memfd_execveat_v1"
 runtime_hex="$(printf %s "$runtime_identity"|/usr/bin/xxd -p -c 9999)";runtime_sha="$(sha_text "$runtime_identity")"
 /bin/bash "$ROOT/bin/wapp-product-seal" "$TMP/product-seal.json" >/dev/null
@@ -43,6 +45,23 @@ make_raw(){
     printf 'DRIFT\t%s\tMODIFIED\ttrue\ttrue\tREGULAR\t11\t101\t%s\t%s\t1000\t1000\t1\t%s\t%s\t%s\t-\t1\tREGULAR\t11\t101\t%s\t%s\t1000\t1000\t1\t%s\t%s\t%s\t-\t1\n' "$log_hex" "$log_before" "$log_mode" "$log_mtime_before" "$ctime_before" "$log_sha1" "$log_after" "$log_mode" "$log_mtime_after" "$ctime_after" "$log_sha2"
     printf 'DRIFT\t%s\tMODIFIED\ttrue\ttrue\tREGULAR\t11\t202\t77\t%s\t1000\t1000\t1\t300\t%s\t%s\t-\t0\tREGULAR\t11\t202\t77\t%s\t1000\t1000\t1\t300\t%s\t%s\t-\t0\n' "$waf_hex" "$waf_mode" "$ctime_before" "$waf_sha" "$waf_mode" "$ctime_after" "$waf_sha"
   } >"$output"
+}
+
+make_ephemeral_raw(){
+  local output="$1" operation="$2" seed="$3" inode="$4" log_before="$5" log_after="$6" ctime_before="$7" ctime_after="$8"
+  local log_before_state="${9:-log-zero}" log_after_state="${10:-log-one}" audit_operation="${11:-$2}" cleanup_state="${12:-CLEANUP_VERIFIED}" selected_launcher_sha="${13:-$launcher_sha}"
+  make_raw "$output" "$operation" "$seed" "$log_before" "$log_after" "$ctime_before" "$ctime_after" 0644 0644 "$log_before_state" "$log_after_state" "$ctime_before" "$ctime_after"
+  /usr/bin/python3 - "$output" "$operation" "$inode" "$helper_sha" "$selected_launcher_sha" "$launcher_bytes" "$audit_operation" "$cleanup_state" <<'PY'
+import hashlib,pathlib,sys
+path,operation,inode,helper,launcher,launcher_bytes,audit_operation,cleanup=sys.argv[1:]
+runtime=f'loader=DEGRADED_ASSURANCE_EPHEMERAL_BOOTSTRAP_V1|launcher_sha={launcher}|launcher_meta=1000:1000:700:11:{inode}:{launcher_bytes}|helper_sha={helper}|transport=sealed_memfd_execveat_v1'
+runtime_sha=hashlib.sha256(runtime.encode()).hexdigest();runtime_hex=runtime.encode().hex()
+p=pathlib.Path(path);lines=p.read_text().splitlines();header=lines[1].split('\t');header[10]=runtime_sha;header[11]=runtime_hex;lines[1]='\t'.join(header)
+launcher_meta=f'1000:1000:700:11:{inode}:{launcher_bytes}'
+launcher_identity=hashlib.sha256((launcher_meta+'\0'+launcher).encode()).hexdigest();stage_identity=hashlib.sha256(('stage-'+operation).encode()).hexdigest()
+lines.append('\t'.join(('EPHEMERAL_BOOTSTRAP_AUDIT_V2',audit_operation,launcher,launcher_bytes,launcher_meta,runtime_sha,launcher_identity,stage_identity,cleanup)))
+p.write_text('\n'.join(lines)+'\n')
+PY
 }
 
 make_raw "$TMP/raw1.tsv" "$operation1" one 10 20 100 101 0644 0644 log-zero log-one
@@ -81,6 +100,44 @@ assert v['disposition']=='VOLATILE_RUNTIME_VERIFIED' and v['paths_remain_visible
 assert v['decision_eligible'] is False and set(v['authority'].values())=={False}
 assert [x['behavior'] for x in v['paths']]==['APPEND_PREFIX_REQUIRED_UPLOAD_LOG_GROWTH','CTIME_ONLY']
 PY
+
+# Ephemeral bootstrap identity is operation-scoped: two separately created,
+# verified and cleaned launchers may have different inodes while their release
+# launcher/helper identity remains exact.
+make_ephemeral_raw "$TMP/ephemeral-raw1.tsv" "$operation1" ephemeral-one 301 10 20 100 101 log-zero log-one
+make_ephemeral_raw "$TMP/ephemeral-raw2.tsv" "$operation2" ephemeral-two 402 20 30 101 201 log-one log-two
+"$DIAG" create --raw "$TMP/ephemeral-raw1.tsv" --root "$root_path" --operation-id "$operation1" --observed-at "$OBS1" --product-seal "$TMP/product-seal.json" --output "$TMP/ephemeral-diag1.json" >/dev/null
+"$DIAG" create --raw "$TMP/ephemeral-raw2.tsv" --root "$root_path" --operation-id "$operation2" --observed-at "$OBS2" --product-seal "$TMP/product-seal.json" --output "$TMP/ephemeral-diag2.json" >/dev/null
+"$TOOL" create --diagnostic-one "$TMP/ephemeral-diag1.json" --diagnostic-two "$TMP/ephemeral-diag2.json" --runtime-provenance "$TMP/provenance.json" --issued-at "$ISSUED" --output "$TMP/ephemeral-disposition.json" >/dev/null
+"$TOOL" verify --artifact "$TMP/ephemeral-disposition.json"|grep -Fq VERIFIED_NON_AUTHORIZING
+/usr/bin/python3 - "$TMP/ephemeral-diag1.json" "$TMP/ephemeral-diag2.json" "$TMP/ephemeral-disposition.json" <<'PY'
+import json,sys
+a,b,d=(json.load(open(path)) for path in sys.argv[1:])
+assert a['runtime_identity']['launcher_metadata']['inode']==301 and b['runtime_identity']['launcher_metadata']['inode']==402
+assert a['runtime_identity_sha256']!=b['runtime_identity_sha256']
+assert d['runtime_identity']['identity_scope']=='OPERATION_SCOPED' and len(d['runtime_identity']['verified_lifecycles'])==2
+assert d['runtime_identity']['launcher_sha256']==a['runtime_identity']['launcher_sha256']==b['runtime_identity']['launcher_sha256']
+assert d['runtime_identity']['helper_sha256']==a['helper_sha256']==b['helper_sha256']
+PY
+
+# Changed bytes cannot be hidden behind a reused inode; operation replay,
+# mismatched nonce and missing cleanup also fail before disposition.
+bad_launcher="$(sha_text changed-launcher-bytes)"
+make_ephemeral_raw "$TMP/ephemeral-changed-bytes.tsv" "$operation2" changed-bytes 301 20 30 101 201 log-one log-two "$operation2" CLEANUP_VERIFIED "$bad_launcher"
+expect_fail ephemeral_changed_bytes "$DIAG" create --raw "$TMP/ephemeral-changed-bytes.tsv" --root "$root_path" --operation-id "$operation2" --observed-at "$OBS2" --product-seal "$TMP/product-seal.json" --output "$TMP/ephemeral-changed-bytes.json"
+make_ephemeral_raw "$TMP/ephemeral-replay.tsv" "$operation1" replay 509 20 30 101 201 log-one log-two
+"$DIAG" create --raw "$TMP/ephemeral-replay.tsv" --root "$root_path" --operation-id "$operation1" --observed-at "$OBS2" --product-seal "$TMP/product-seal.json" --output "$TMP/ephemeral-replay.json" >/dev/null
+expect_fail ephemeral_stale_replay "$TOOL" create --diagnostic-one "$TMP/ephemeral-diag1.json" --diagnostic-two "$TMP/ephemeral-replay.json" --runtime-provenance "$TMP/provenance.json" --issued-at "$ISSUED" --output "$TMP/ephemeral-replay-disposition.json"
+make_ephemeral_raw "$TMP/ephemeral-wrong-operation.tsv" "$operation2" wrong-operation 510 20 30 101 201 log-one log-two "$operation1"
+expect_fail ephemeral_wrong_operation "$DIAG" create --raw "$TMP/ephemeral-wrong-operation.tsv" --root "$root_path" --operation-id "$operation2" --observed-at "$OBS2" --product-seal "$TMP/product-seal.json" --output "$TMP/ephemeral-wrong-operation.json"
+make_ephemeral_raw "$TMP/ephemeral-no-cleanup.tsv" "$operation2" no-cleanup 511 20 30 101 201 log-one log-two "$operation2" CLEANUP_SKIPPED
+expect_fail ephemeral_no_cleanup "$DIAG" create --raw "$TMP/ephemeral-no-cleanup.tsv" --root "$root_path" --operation-id "$operation2" --observed-at "$OBS2" --product-seal "$TMP/product-seal.json" --output "$TMP/ephemeral-no-cleanup.json"
+cp "$TMP/ephemeral-raw2.tsv" "$TMP/ephemeral-false-launcher-identity.tsv"
+/usr/bin/python3 - "$TMP/ephemeral-false-launcher-identity.tsv" <<'PY'
+import pathlib,sys
+p=pathlib.Path(sys.argv[1]);lines=p.read_text().splitlines();fields=lines[-1].split('\t');fields[6]='0'*64;lines[-1]='\t'.join(fields);p.write_text('\n'.join(lines)+'\n')
+PY
+expect_fail ephemeral_false_launcher_identity "$DIAG" create --raw "$TMP/ephemeral-false-launcher-identity.tsv" --root "$root_path" --operation-id "$operation2" --observed-at "$OBS2" --product-seal "$TMP/product-seal.json" --output "$TMP/ephemeral-false-launcher-identity.json"
 
 for variant in ioc persistence unknown extra;do make_provenance "$TMP/$variant.json" "$variant";expect_fail "$variant" "$TOOL" create --diagnostic-one "$TMP/diag1.json" --diagnostic-two "$TMP/diag2.json" --runtime-provenance "$TMP/$variant.json" --issued-at "$ISSUED" --output "$TMP/$variant-disposition.json";done
 
@@ -139,6 +196,57 @@ v=json.load(open(sys.argv[1]));assert v['contract']=='BOUNDED_VOLATILE_RUNTIME_I
 assert v['paths_remain_visible'] is True and v['filesystem_coverage_weakened'] is False and v['decision_eligible'] is False
 assert set(v['authority'].values())=={False} and len(v['paths'])==2
 PY
+
+# A third, independently staged ephemeral launcher may consume the resulting
+# disposition with another inode, but only with its own exact cleanup audit.
+ephemeral_inventory_operation="$(sha_text ephemeral-inventory-operation)"
+ephemeral_inventory_runtime="loader=DEGRADED_ASSURANCE_EPHEMERAL_BOOTSTRAP_V1|launcher_sha=$launcher_sha|launcher_meta=1000:1000:700:11:777:$launcher_bytes|helper_sha=$helper_sha|transport=sealed_memfd_execveat_v1"
+ephemeral_inventory_runtime_sha="$(sha_text "$ephemeral_inventory_runtime")"
+cp "$TMP/candidate.tsv" "$TMP/ephemeral-candidate.tsv"
+/usr/bin/python3 - "$TMP/ephemeral-candidate.tsv" "$ephemeral_inventory_operation" "$ephemeral_inventory_runtime_sha" "$launcher_sha" "$launcher_bytes" <<'PY'
+import hashlib,pathlib,sys
+path,operation,runtime_sha,launcher,launcher_bytes=sys.argv[1:]
+p=pathlib.Path(path);lines=p.read_text().splitlines();lines[0]='CAPTURE_NONCE\t'+operation
+for index,line in enumerate(lines):
+ if line.startswith('RUNTIME\t'):
+  fields=line.split('\t');fields[4]=runtime_sha;lines[index]='\t'.join(fields)
+launcher_meta=f'1000:1000:700:11:777:{launcher_bytes}'
+launcher_identity=hashlib.sha256((launcher_meta+'\0'+launcher).encode()).hexdigest();stage_identity=hashlib.sha256(('stage-'+operation).encode()).hexdigest()
+lines.append('\t'.join(('EPHEMERAL_BOOTSTRAP_AUDIT_V2',operation,launcher,launcher_bytes,launcher_meta,runtime_sha,launcher_identity,stage_identity,'CLEANUP_VERIFIED')))
+p.write_text('\n'.join(lines)+'\n')
+PY
+"$TOOL" inventory-create --raw-candidate "$TMP/ephemeral-candidate.tsv" --disposition "$TMP/ephemeral-disposition.json" --output "$TMP/ephemeral-inventory.json" >/dev/null
+"$TOOL" inventory-verify --artifact "$TMP/ephemeral-inventory.json"|grep -Fq VERIFIED_NON_AUTHORIZING
+sed '/^EPHEMERAL_BOOTSTRAP_AUDIT_V2\t/d' "$TMP/ephemeral-candidate.tsv" >"$TMP/ephemeral-candidate-no-cleanup.tsv"
+expect_fail ephemeral_inventory_no_cleanup "$TOOL" inventory-create --raw-candidate "$TMP/ephemeral-candidate-no-cleanup.tsv" --disposition "$TMP/ephemeral-disposition.json" --output "$TMP/ephemeral-inventory-no-cleanup.json"
+cp "$TMP/ephemeral-candidate.tsv" "$TMP/ephemeral-candidate-reused-operation.tsv"
+/usr/bin/python3 - "$TMP/ephemeral-candidate-reused-operation.tsv" "$operation1" <<'PY'
+import pathlib,sys
+p=pathlib.Path(sys.argv[1]);operation=sys.argv[2];lines=p.read_text().splitlines();lines[0]='CAPTURE_NONCE\t'+operation;fields=lines[-1].split('\t');fields[1]=operation;lines[-1]='\t'.join(fields);p.write_text('\n'.join(lines)+'\n')
+PY
+expect_fail ephemeral_inventory_reused_operation "$TOOL" inventory-create --raw-candidate "$TMP/ephemeral-candidate-reused-operation.tsv" --disposition "$TMP/ephemeral-disposition.json" --output "$TMP/ephemeral-inventory-reused-operation.json"
+cp "$TMP/ephemeral-candidate.tsv" "$TMP/ephemeral-candidate-reused-stage.tsv"
+/usr/bin/python3 - "$TMP/ephemeral-candidate-reused-stage.tsv" "$TMP/ephemeral-diag1.json" <<'PY'
+import json,pathlib,sys
+p=pathlib.Path(sys.argv[1]);stage=json.load(open(sys.argv[2]))['ephemeral_bootstrap_audit']['stage_identity_sha256'];lines=p.read_text().splitlines();fields=lines[-1].split('\t');fields[7]=stage;lines[-1]='\t'.join(fields);p.write_text('\n'.join(lines)+'\n')
+PY
+expect_fail ephemeral_inventory_reused_stage "$TOOL" inventory-create --raw-candidate "$TMP/ephemeral-candidate-reused-stage.tsv" --disposition "$TMP/ephemeral-disposition.json" --output "$TMP/ephemeral-inventory-reused-stage.json"
+cp "$TMP/ephemeral-candidate.tsv" "$TMP/ephemeral-candidate-reused-runtime.tsv"
+/usr/bin/python3 - "$TMP/ephemeral-candidate-reused-runtime.tsv" "$TMP/ephemeral-diag1.json" <<'PY'
+import hashlib,json,pathlib,sys
+p=pathlib.Path(sys.argv[1]);observed=json.load(open(sys.argv[2]));runtime=observed['runtime_identity'];meta=runtime['launcher_metadata'];metadata=':'.join(str(meta[key]) for key in ('uid','gid','mode','device','inode','bytes'));runtime_sha=observed['runtime_identity_sha256'];lines=p.read_text().splitlines()
+for index,line in enumerate(lines):
+ if line.startswith('RUNTIME\t'):
+  fields=line.split('\t');fields[4]=runtime_sha;lines[index]='\t'.join(fields)
+fields=lines[-1].split('\t');fields[4]=metadata;fields[5]=runtime_sha;fields[6]=hashlib.sha256((metadata+'\0'+fields[2]).encode()).hexdigest();lines[-1]='\t'.join(fields);p.write_text('\n'.join(lines)+'\n')
+PY
+expect_fail ephemeral_inventory_reused_runtime "$TOOL" inventory-create --raw-candidate "$TMP/ephemeral-candidate-reused-runtime.tsv" --disposition "$TMP/ephemeral-disposition.json" --output "$TMP/ephemeral-inventory-reused-runtime.json"
+cp "$TMP/ephemeral-candidate.tsv" "$TMP/ephemeral-candidate-runtime-substitution.tsv"
+/usr/bin/python3 - "$TMP/ephemeral-candidate-runtime-substitution.tsv" <<'PY'
+import pathlib,sys
+p=pathlib.Path(sys.argv[1]);lines=p.read_text().splitlines();fields=lines[-1].split('\t');fields[5]='f'*64;lines[-1]='\t'.join(fields);p.write_text('\n'.join(lines)+'\n')
+PY
+expect_fail ephemeral_inventory_runtime_substitution "$TOOL" inventory-create --raw-candidate "$TMP/ephemeral-candidate-runtime-substitution.tsv" --disposition "$TMP/ephemeral-disposition.json" --output "$TMP/ephemeral-inventory-runtime-substitution.json"
 cp "$TMP/candidate.tsv" "$TMP/candidate-extra.tsv";printf 'VOLATILE_RUNTIME_CANDIDATE_PATH\t757365722d6164646564\tCTIME_ONLY\tOBSERVED_STABLE\n' >>"$TMP/candidate-extra.tsv"
 expect_fail candidate_scope "$TOOL" inventory-create --raw-candidate "$TMP/candidate-extra.tsv" --disposition "$TMP/disposition.json" --output "$TMP/candidate-extra.json"
 cp "$TMP/candidate.tsv" "$TMP/candidate-executable.tsv";sed -i.bak "s/${waf_hex}\\t${abs_waf_hex}\\tREGULAR\\t77\\t0644/${waf_hex}\\t${abs_waf_hex}\\tREGULAR\\t77\\t0755/" "$TMP/candidate-executable.tsv";rm -f "$TMP/candidate-executable.tsv.bak"

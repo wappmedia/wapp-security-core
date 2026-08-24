@@ -135,6 +135,7 @@ launcher_meta="$(meta "$launcher")"||fail 'launcher metadata unavailable';IFS=: 
 launcher_identity="$(printf '%s\0%s' "$launcher_meta" "$LAUNCHER_SHA"|hash_text)";[[ "$launcher_identity" =~ ^[a-f0-9]{64}$ ]]||fail 'launcher identity hash failed'
 stage_identity="$(printf '%s\0%s\0%s' "$stage_dir" "$dir_meta" "$capture_nonce"|hash_text)";[[ "$stage_identity" =~ ^[a-f0-9]{64}$ ]]||fail 'stage identity hash failed'
 runtime_identity="loader=DEGRADED_ASSURANCE_EPHEMERAL_BOOTSTRAP_V1|launcher_sha=$LAUNCHER_SHA|launcher_meta=$launcher_meta|helper_sha=$native_sha|transport=sealed_memfd_execveat_v1"
+runtime_identity_sha="$(printf %s "$runtime_identity"|hash_text)";[[ "$runtime_identity_sha" =~ ^[a-f0-9]{64}$ ]]||fail 'runtime identity hash failed'
 
 launcher_args=("$capture_mode" "$target_root" "$capture_nonce" "$runtime_identity");[[ -z "$selected_rel_hex" ]]||launcher_args+=("$selected_rel_hex")
 "$OPENSSL" base64 -d -A <<'WAPP_NATIVE_HELPER_BASE64_V1' | "$launcher" "${launcher_args[@]}"
@@ -145,5 +146,5 @@ WAPP_NATIVE_HELPER_BASE64_V1
 "$RM" -- "$launcher"||fail 'exact launcher unlink failed';[[ ! -e "$launcher"&&! -L "$launcher" ]]||fail 'launcher cleanup absence failed'
 "$RMDIR" -- "$stage_dir"||fail 'operation directory cleanup failed';[[ ! -e "$stage_dir"&&! -L "$stage_dir" ]]||fail 'operation directory cleanup absence failed'
 created=false;cleanup_done=true;trap - EXIT
-printf 'EPHEMERAL_BOOTSTRAP_AUDIT_V1\t%s\t%s\t%s\t%s\t%s\tCLEANUP_VERIFIED\n' "$capture_nonce" "$LAUNCHER_SHA" "$LAUNCHER_BYTES" "$launcher_identity" "$stage_identity"
+printf 'EPHEMERAL_BOOTSTRAP_AUDIT_V2\t%s\t%s\t%s\t%s\t%s\t%s\t%s\tCLEANUP_VERIFIED\n' "$capture_nonce" "$LAUNCHER_SHA" "$LAUNCHER_BYTES" "$launcher_meta" "$runtime_identity_sha" "$launcher_identity" "$stage_identity"
 exit 0

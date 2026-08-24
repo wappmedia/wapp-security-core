@@ -117,7 +117,7 @@ source,target=map(pathlib.Path,sys.argv[1:]);target.write_bytes(base64.b64decode
 PY
 before="$(find "$SITE" -print0|sort -z|xargs -0 stat -c '%n:%F:%s:%a:%u:%g:%d:%i'|sha256sum|awk '{print $1}')";out="$TMP/out.tsv"
 /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc "$probe" "$SITE" "$nonce" 107feade2363ec810517f4e0796aad576f0966822e514acb0749df6dce13c41b 92824 inventory '' >"$out"
-grep -Fq $'CAPTURE_NONCE\t'"$nonce" "$out"&&grep -Fq 'EPHEMERAL_BOOTSTRAP_AUDIT_V1' "$out"&&grep -Fq 'CLEANUP_VERIFIED' "$out"||fail correct_staged_launcher
+grep -Fq $'CAPTURE_NONCE\t'"$nonce" "$out"&&grep -Fq 'EPHEMERAL_BOOTSTRAP_AUDIT_V2' "$out"&&grep -Fq 'CLEANUP_VERIFIED' "$out"||fail correct_staged_launcher
 after="$(find "$SITE" -print0|sort -z|xargs -0 stat -c '%n:%F:%s:%a:%u:%g:%d:%i'|sha256sum|awk '{print $1}')";[[ "$before" == "$after" ]]||fail webroot_modified
 [[ ! -e "$ROOT_PARENT/.wapp-security-ephemeral-bootstrap-$nonce" ]]||fail cleanup_not_absent
 

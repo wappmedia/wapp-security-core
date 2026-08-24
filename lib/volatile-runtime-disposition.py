@@ -131,6 +131,66 @@ def diagnostic(path: pathlib.Path) -> tuple[dict[str, object], bytes]:
     return value, raw
 
 
+def runtime_continuity(first: dict[str, object], second: dict[str, object]) -> dict[str, object]:
+    left, right = first.get("runtime_identity"), second.get("runtime_identity")
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        fail("repeated observation runtime identity missing")
+    left_contract, right_contract = left.get("contract"), right.get("contract")
+    if left_contract != right_contract:
+        fail("repeated observation runtime contract mismatch")
+    if left_contract == "TRUSTED_PERL_SEALED_MEMFD_EXECVEAT_V1":
+        if left != right or first.get("runtime_identity_sha256") != second.get("runtime_identity_sha256"):
+            fail("repeated observation runtime identity mismatch")
+        if first.get("ephemeral_bootstrap_audit") is not None or second.get("ephemeral_bootstrap_audit") is not None or first.get("ephemeral_bootstrap_audit_sha256") is not None or second.get("ephemeral_bootstrap_audit_sha256") is not None:
+            fail("persistent runtime has unexpected lifecycle audit")
+        return left
+    if left_contract != "DEGRADED_ASSURANCE_EPHEMERAL_BOOTSTRAP_V1":
+        fail("repeated observation runtime contract unsupported")
+    required = {"contract", "helper_sha256", "identity_hex", "identity_scope", "identity_sha256", "launcher_metadata", "launcher_sha256", "transport"}
+    if set(left) != required or set(right) != required or left.get("identity_scope") != "OPERATION_SCOPED" or right.get("identity_scope") != "OPERATION_SCOPED":
+        fail("ephemeral runtime identity contract invalid")
+    left_meta, right_meta = left.get("launcher_metadata"), right.get("launcher_metadata")
+    meta_keys = {"bytes", "device", "gid", "inode", "mode", "uid"}
+    if not isinstance(left_meta, dict) or not isinstance(right_meta, dict) or set(left_meta) != meta_keys or set(right_meta) != meta_keys:
+        fail("ephemeral launcher metadata missing")
+    if first.get("inventory_operation_id") == second.get("inventory_operation_id"):
+        fail("ephemeral lifecycle operation replay")
+    audit_hashes = (first.get("ephemeral_bootstrap_audit_sha256"), second.get("ephemeral_bootstrap_audit_sha256"))
+    audits = (first.get("ephemeral_bootstrap_audit"), second.get("ephemeral_bootstrap_audit"))
+    audit_keys = {"cleanup_state", "contract", "launcher_bytes", "launcher_identity_sha256", "launcher_metadata", "launcher_sha256", "operation_id", "runtime_identity_sha256", "stage_identity_sha256"}
+    if any(not isinstance(value, str) or not HEX64.fullmatch(value) for value in audit_hashes) or audit_hashes[0] == audit_hashes[1]:
+        fail("ephemeral lifecycle audit invalid or replayed")
+    if any(not isinstance(audit, dict) or set(audit) != audit_keys for audit in audits):
+        fail("ephemeral lifecycle audit contract invalid")
+    assert isinstance(audits[0], dict) and isinstance(audits[1], dict)
+    for artifact, audit in ((first, audits[0]), (second, audits[1])):
+        artifact_runtime = artifact.get("runtime_identity")
+        if not isinstance(artifact_runtime, dict) or audit.get("contract") != "EPHEMERAL_BOOTSTRAP_AUDIT_V2" or audit.get("operation_id") != artifact.get("inventory_operation_id") or audit.get("cleanup_state") != "CLEANUP_VERIFIED" or audit.get("launcher_sha256") != artifact_runtime.get("launcher_sha256") or audit.get("launcher_bytes") != artifact_runtime.get("launcher_metadata", {}).get("bytes") or audit.get("launcher_metadata") != artifact_runtime.get("launcher_metadata") or audit.get("runtime_identity_sha256") != artifact.get("runtime_identity_sha256") or any(not isinstance(audit.get(key), str) or not HEX64.fullmatch(audit[key]) for key in ("launcher_identity_sha256", "stage_identity_sha256")):
+            fail("ephemeral lifecycle audit binding invalid")
+    if audits[0]["stage_identity_sha256"] == audits[1]["stage_identity_sha256"]:
+        fail("ephemeral staging lifecycle replay")
+    exact = ("launcher_sha256", "helper_sha256", "transport")
+    if any(left.get(key) != right.get(key) for key in exact):
+        fail("ephemeral release identity mismatch")
+    # The inode is intentionally operation-scoped. All other ownership,
+    # permission, filesystem and release-byte properties remain exact.
+    stable_meta = {key: left_meta[key] for key in sorted(meta_keys - {"inode"})}
+    if stable_meta != {key: right_meta[key] for key in sorted(meta_keys - {"inode"})}:
+        fail("ephemeral launcher metadata drift")
+    return {
+        "contract": left_contract,
+        "identity_scope": "OPERATION_SCOPED",
+        "launcher_sha256": left["launcher_sha256"],
+        "helper_sha256": left["helper_sha256"],
+        "transport": left["transport"],
+        "stable_launcher_metadata": stable_meta,
+        "verified_lifecycles": [
+            {"operation_id": first["inventory_operation_id"], "runtime_identity_sha256": first["runtime_identity_sha256"], "audit_sha256": audit_hashes[0], "launcher_identity_sha256": audits[0]["launcher_identity_sha256"], "stage_identity_sha256": audits[0]["stage_identity_sha256"]},
+            {"operation_id": second["inventory_operation_id"], "runtime_identity_sha256": second["runtime_identity_sha256"], "audit_sha256": audit_hashes[1], "launcher_identity_sha256": audits[1]["launcher_identity_sha256"], "stage_identity_sha256": audits[1]["stage_identity_sha256"]},
+        ],
+    }
+
+
 def state_without_ctime(state: dict[str, object]) -> dict[str, object]:
     return {key: value for key, value in state.items() if key != "ctime_ns"}
 
@@ -300,8 +360,8 @@ def parse_candidate(path: pathlib.Path, disposition: dict[str, object]) -> tuple
             if fields[2] not in {"CTIME_ONLY", "APPEND_PREFIX_VERIFIED_LOG_GROWTH", "APPEND_PREFIX_VERIFIED_UPLOAD_LOG_GROWTH"} or fields[3] not in {"OBSERVED_DRIFT", "OBSERVED_STABLE"}:
                 fail("volatile inventory candidate behavior invalid")
             candidate_paths[fields[1]] = (fields[2], fields[3])
-        elif kind == "EPHEMERAL_BOOTSTRAP_AUDIT_V1":
-            if not candidate_started or audit is not None or index != len(lines) - 1 or len(fields) != 7:
+        elif kind == "EPHEMERAL_BOOTSTRAP_AUDIT_V2":
+            if not candidate_started or audit is not None or index != len(lines) - 1 or len(fields) != 9:
                 fail("volatile inventory bootstrap audit invalid")
             audit = fields
         elif kind == "UNRESOLVED":
@@ -327,7 +387,7 @@ def parse_candidate(path: pathlib.Path, disposition: dict[str, object]) -> tuple
     exact_sint(root[9], "root mtime"); exact_sint(root[10], "root ctime")
     runtime_identity = disposition.get("runtime_identity")
     expected_runtime_path = b"memfd:wapp-native-displaced-inventory-linux-x86_64-v1".hex()
-    if not isinstance(runtime_identity, dict) or runtime[1] != "PRODUCTION_RELEASE_PINNED_NATIVE_LINUX_X86_64_MEMFD_V1" or runtime[2] != expected_runtime_path or runtime[3] != disposition.get("helper_sha256") or runtime[4] != runtime_identity.get("identity_sha256") or not HEX64.fullmatch(runtime[3]) or not HEX64.fullmatch(runtime[4]):
+    if not isinstance(runtime_identity, dict) or runtime[1] != "PRODUCTION_RELEASE_PINNED_NATIVE_LINUX_X86_64_MEMFD_V1" or runtime[2] != expected_runtime_path or runtime[3] != disposition.get("helper_sha256") or not HEX64.fullmatch(runtime[3]) or not HEX64.fullmatch(runtime[4]):
         fail("volatile inventory candidate helper mismatch")
     expected_caps = ["200000", "50000", "100000", "1073741824", "8589934592", "64", "300", "4096", "125829120"]
     if summary[11:] != expected_caps or summary[8] != "0" or summary[9] != "true" or not HEX64.fullmatch(summary[10]):
@@ -349,10 +409,30 @@ def parse_candidate(path: pathlib.Path, disposition: dict[str, object]) -> tuple
     if runtime_contract == "DEGRADED_ASSURANCE_EPHEMERAL_BOOTSTRAP_V1":
         policy_path = pathlib.Path(__file__).resolve().parent.parent / "config/native-ephemeral-bootstrap.json"
         policy, _ = load_json(policy_path)
-        if audit is None or audit[1] != nonce or audit[2] != policy.get("launcher_binary_sha256") or audit[3] != str(policy.get("launcher_binary_bytes")) or not HEX64.fullmatch(audit[4]) or not HEX64.fullmatch(audit[5]) or audit[6] != "CLEANUP_VERIFIED":
+        stable_meta = runtime_identity.get("stable_launcher_metadata")
+        if runtime_identity.get("identity_scope") != "OPERATION_SCOPED" or runtime_identity.get("launcher_sha256") != policy.get("launcher_binary_sha256") or runtime_identity.get("helper_sha256") != runtime[3] or runtime_identity.get("transport") != "sealed_memfd_execveat_v1" or not isinstance(stable_meta, dict) or stable_meta.get("bytes") != policy.get("launcher_binary_bytes") or stable_meta.get("mode") != "700":
+            fail("volatile inventory degraded runtime identity mismatch")
+        if audit is None or audit[1] != nonce or audit[2] != policy.get("launcher_binary_sha256") or audit[3] != str(policy.get("launcher_binary_bytes")) or audit[8] != "CLEANUP_VERIFIED" or any(not HEX64.fullmatch(audit[index]) for index in (5, 6, 7)):
             fail("volatile inventory degraded bootstrap audit mismatch")
+        metadata_parts = audit[4].split(":")
+        if len(metadata_parts) != 6 or not all(UINT.fullmatch(value) for value in metadata_parts[:2] + metadata_parts[3:]) or not MODE.fullmatch(metadata_parts[2]):
+            fail("volatile inventory degraded launcher metadata invalid")
+        candidate_meta = {"uid": int(metadata_parts[0]), "gid": int(metadata_parts[1]), "mode": metadata_parts[2], "device": int(metadata_parts[3]), "inode": int(metadata_parts[4]), "bytes": int(metadata_parts[5])}
+        if {key: candidate_meta[key] for key in sorted(candidate_meta.keys() - {"inode"})} != stable_meta or candidate_meta["bytes"] != policy.get("launcher_binary_bytes") or candidate_meta["mode"] != "700":
+            fail("volatile inventory degraded launcher metadata drift")
+        candidate_runtime = f"loader=DEGRADED_ASSURANCE_EPHEMERAL_BOOTSTRAP_V1|launcher_sha={audit[2]}|launcher_meta={audit[4]}|helper_sha={runtime[3]}|transport=sealed_memfd_execveat_v1"
+        expected_runtime_sha = hashlib.sha256(candidate_runtime.encode("ascii")).hexdigest()
+        expected_launcher_identity = hashlib.sha256((audit[4] + "\0" + audit[2]).encode("ascii")).hexdigest()
+        if audit[5] != expected_runtime_sha or runtime[4] != expected_runtime_sha or audit[6] != expected_launcher_identity:
+            fail("volatile inventory degraded runtime/audit identity mismatch")
+        lifecycles = runtime_identity.get("verified_lifecycles")
+        lifecycle_keys = {"audit_sha256", "launcher_identity_sha256", "operation_id", "runtime_identity_sha256", "stage_identity_sha256"}
+        if not isinstance(lifecycles, list) or len(lifecycles) != 2 or any(not isinstance(item, dict) or set(item) != lifecycle_keys for item in lifecycles):
+            fail("volatile inventory degraded lifecycle history invalid")
+        if nonce in {str(item["operation_id"]) for item in lifecycles} or audit[7] in {str(item["stage_identity_sha256"]) for item in lifecycles} or expected_runtime_sha in {str(item["runtime_identity_sha256"]) for item in lifecycles}:
+            fail("volatile inventory degraded lifecycle replay")
     elif runtime_contract == "TRUSTED_PERL_SEALED_MEMFD_EXECVEAT_V1":
-        if audit is not None:
+        if runtime[4] != runtime_identity.get("identity_sha256") or audit is not None:
             fail("volatile inventory unexpected bootstrap audit")
     else:
         fail("volatile inventory runtime contract invalid")
@@ -469,8 +549,7 @@ def derive(first_path: pathlib.Path, second_path: pathlib.Path, provenance_path:
     root_identities = [first.get("pass1_root"), first.get("pass2_root"), second.get("pass1_root"), second.get("pass2_root")]
     if not all(isinstance(identity, dict) and set(identity) == {"device", "inode"} for identity in root_identities) or any(identity != root_identities[0] for identity in root_identities[1:]):
         fail("repeated observation root identity mismatch")
-    if first.get("runtime_identity") != second.get("runtime_identity") or first.get("runtime_identity_sha256") != second.get("runtime_identity_sha256"):
-        fail("repeated observation runtime identity mismatch")
+    runtime_identity = runtime_continuity(first, second)
     first_product, second_product = first.get("product_seal"), second.get("product_seal")
     product_keys = ("commit", "version", "runtime_components")
     if not isinstance(first_product, dict) or not isinstance(second_product, dict) or any(first_product.get(key) != second_product.get(key) for key in product_keys):
@@ -544,7 +623,7 @@ def derive(first_path: pathlib.Path, second_path: pathlib.Path, provenance_path:
         "root_path_hex": first["root_path_hex"],
         "root_identity": root_identities[0],
         "helper_sha256": first["helper_sha256"],
-        "runtime_identity": first["runtime_identity"],
+        "runtime_identity": runtime_identity,
         "public_core_version": first["public_core_version"],
         "target_product_identity_sha256": provenance_value["target_product_identity_sha256"],
         "diagnostics": [reference(first_path, first_raw), reference(second_path, second_raw)],

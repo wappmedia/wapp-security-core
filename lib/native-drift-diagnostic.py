@@ -240,7 +240,26 @@ def validate_runtime_identity(runtime_hex: str, runtime_sha: str, helper_sha: st
     if maximum and maximum.group(3) == helper_sha:
         return {"contract": "TRUSTED_PERL_SEALED_MEMFD_EXECVEAT_V1", "identity_hex": runtime_hex, "identity_sha256": runtime_sha}
     if degraded and degraded.group(1) == ephemeral_policy.get("launcher_binary_sha256") and degraded.group(3) == helper_sha:
-        return {"contract": "DEGRADED_ASSURANCE_EPHEMERAL_BOOTSTRAP_V1", "identity_hex": runtime_hex, "identity_sha256": runtime_sha}
+        metadata = degraded.group(2).split(":")
+        if len(metadata) != 6 or not all(INTEGER.fullmatch(item) for item in metadata) or metadata[2] != "700" or int(metadata[5]) != ephemeral_policy.get("launcher_binary_bytes"):
+            fail("ephemeral launcher metadata invalid")
+        return {
+            "contract": "DEGRADED_ASSURANCE_EPHEMERAL_BOOTSTRAP_V1",
+            "identity_scope": "OPERATION_SCOPED",
+            "identity_hex": runtime_hex,
+            "identity_sha256": runtime_sha,
+            "launcher_sha256": degraded.group(1),
+            "launcher_metadata": {
+                "uid": int(metadata[0]),
+                "gid": int(metadata[1]),
+                "mode": metadata[2],
+                "device": int(metadata[3]),
+                "inode": int(metadata[4]),
+                "bytes": int(metadata[5]),
+            },
+            "helper_sha256": degraded.group(3),
+            "transport": "sealed_memfd_execveat_v1",
+        }
     fail("runtime identity contract mismatch")
 
 
@@ -273,10 +292,10 @@ def parse_raw(raw: bytes, expected_root: str, expected_operation: str, policy: d
         fail("diagnostic delta cap")
     bootstrap_audit = None
     delta_lines = lines[2:]
-    if delta_lines and delta_lines[-1].startswith("EPHEMERAL_BOOTSTRAP_AUDIT_V1\t"):
+    if delta_lines and delta_lines[-1].startswith("EPHEMERAL_BOOTSTRAP_AUDIT_V2\t"):
         bootstrap_audit = delta_lines.pop()
         audit = bootstrap_audit.split("\t")
-        if len(audit) != 7 or audit[1] != expected_operation or audit[-1] != "CLEANUP_VERIFIED":
+        if len(audit) != 9 or audit[1] != expected_operation or audit[-1] != "CLEANUP_VERIFIED" or any(not HEX64.fullmatch(audit[index]) for index in (5, 6, 7)):
             fail("ephemeral bootstrap audit invalid")
     if len(delta_lines) != count + issue_count:
         fail("diagnostic cardinality mismatch")
@@ -322,10 +341,26 @@ def parse_raw(raw: bytes, expected_root: str, expected_operation: str, policy: d
         issues.append({"normalized_path_hex": fields[1], "reason": fields[2], "detail_sha256": fields[3], "pass1_exists": fields[4] == "true", "pass2_exists": fields[5] == "true"})
     if bootstrap_audit:
         audit = bootstrap_audit.split("\t")
-        if runtime["contract"] != "DEGRADED_ASSURANCE_EPHEMERAL_BOOTSTRAP_V1" or audit[2] != ephemeral_policy.get("launcher_binary_sha256") or audit[3] != str(ephemeral_policy.get("launcher_binary_bytes")):
+        metadata = runtime.get("launcher_metadata")
+        if not isinstance(metadata, dict):
+            fail("ephemeral runtime metadata missing")
+        metadata_text = ":".join(str(metadata[key]) for key in ("uid", "gid", "mode", "device", "inode", "bytes"))
+        expected_launcher_identity = hashlib.sha256((metadata_text + "\0" + str(runtime.get("launcher_sha256"))).encode("ascii")).hexdigest()
+        if runtime["contract"] != "DEGRADED_ASSURANCE_EPHEMERAL_BOOTSTRAP_V1" or audit[2] != ephemeral_policy.get("launcher_binary_sha256") or audit[3] != str(ephemeral_policy.get("launcher_binary_bytes")) or audit[4] != metadata_text or audit[5] != runtime.get("identity_sha256") or audit[6] != expected_launcher_identity:
             fail("ephemeral runtime/audit mismatch")
     elif runtime["contract"] == "DEGRADED_ASSURANCE_EPHEMERAL_BOOTSTRAP_V1":
         fail("ephemeral bootstrap audit missing")
+    lifecycle = None if bootstrap_audit is None else {
+        "contract": "EPHEMERAL_BOOTSTRAP_AUDIT_V2",
+        "operation_id": audit[1],
+        "launcher_sha256": audit[2],
+        "launcher_bytes": int(audit[3]),
+        "launcher_metadata": runtime["launcher_metadata"],
+        "runtime_identity_sha256": audit[5],
+        "launcher_identity_sha256": audit[6],
+        "stage_identity_sha256": audit[7],
+        "cleanup_state": audit[8],
+    }
     return {
         "root_path_hex": header[2],
         "pass1_root": {"device": numeric(header[3], "pass1 root device"), "inode": numeric(header[4], "pass1 root inode")},
@@ -337,6 +372,7 @@ def parse_raw(raw: bytes, expected_root: str, expected_operation: str, policy: d
         "runtime_identity": runtime,
         "deltas": deltas,
         "issue_deltas": issues,
+        "ephemeral_bootstrap_audit": lifecycle,
         "ephemeral_bootstrap_audit_sha256": hashlib.sha256((bootstrap_audit + "\n").encode("ascii")).hexdigest() if bootstrap_audit else None,
     }
 
