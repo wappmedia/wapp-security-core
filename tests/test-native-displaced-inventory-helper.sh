@@ -7,7 +7,8 @@ ARTIFACT="$ROOT/libexec/wapp-native-displaced-inventory-linux-x86_64.b64.txt"
 POLICY="$ROOT/config/native-filesystem-helper.json"
 LOADER="$ROOT/lib/native-displaced-inventory-loader.sh"
 TMP="$(mktemp -d 2>/dev/null||mktemp -d -t wapp-native-filesystem-helper-test)"
-trap 'rm -rf "$TMP"' EXIT
+cleanup(){ chmod 700 "$TMP/provider-neutral/site-root/permission-denied" 2>/dev/null||true;rm -rf "$TMP"; }
+trap cleanup EXIT
 fail(){ printf 'FAIL: %s\n' "$1" >&2;exit 1; }
 expect_fail(){ local name="$1";shift;if "$@" >"$TMP/$name.out" 2>"$TMP/$name.err";then fail "$name accepted";fi; }
 sha(){ /usr/bin/shasum -a 256 "$1"|/usr/bin/awk '{print $1}'; }

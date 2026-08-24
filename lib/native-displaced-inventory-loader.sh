@@ -53,7 +53,7 @@ local $/;my $text=<STDIN>;defined($text) or die "loader: payload unavailable\n";
 my %v;@v{("A".."Z","a".."z",0..9,"+","/")}=(0..63);my $raw="";
 for(my $i=0;$i<length($text);$i+=4){my @c=map substr($text,$i+$_,1),0..3;my @n=map {$_ eq "="?0:$v{$_}} @c;die "loader: base64 alphabet\n" if grep {!defined} @n;my $x=($n[0]<<18)|($n[1]<<12)|($n[2]<<6)|$n[3];$raw.=chr(($x>>16)&255);$raw.=chr(($x>>8)&255) if $c[2] ne "=";$raw.=chr($x&255) if $c[3] ne "=";}die "loader: decoded payload size\n" unless length($raw)==$expected_bytes;
 my $fd=syscall(319,"wapp-native-displaced-inventory",2);die "loader: memfd_create unavailable\n" if $fd<0;
-open(my $fh,"+<&=",$fd) or die "loader: memfd handle\n";binmode($fh);my $off=0;while($off<length($raw)){my $n=syswrite($fh,$raw,length($raw)-$off,$off);die "loader: memfd write\n" unless defined($n)&&$n>0;$off+=$n;}die "loader: memfd size\n" unless $off==length($raw);
+open(my $fh,"+<&",$fd) or die "loader: memfd handle\n";binmode($fh);my $off=0;while($off<length($raw)){my $n=syswrite($fh,$raw,length($raw)-$off,$off);die "loader: memfd write\n" unless defined($n)&&$n>0;$off+=$n;}die "loader: memfd size\n" unless $off==length($raw);
 die "loader: memfd seal\n" unless fcntl($fh,1033,15);my $seals=fcntl($fh,1034,0);die "loader: incomplete memfd seals\n" unless defined($seals)&&($seals&15)==15;
 my @args=("wapp-native-displaced-inventory",$mode,$root,$nonce,$expected,$identity,"$fd");push @args,$selected if $mode eq "rollback";my @hold=map "$_\0",@args;my $ptr="";$ptr.=pack("p",$_) for @hold;$ptr.=pack("J",0);my $env=pack("J",0);
 syscall(322,$fd,"",$ptr,$env,0x1000);die "loader: execveat unavailable\n";
