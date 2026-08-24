@@ -52,6 +52,11 @@ REQUIRED_PRODUCT_COMPONENTS = {
     "lib/emergency-operator-v1.py",
     "lib/recovery-integrity.sh",
     "config/reviewer-trust-anchors.json",
+    "config/native-filesystem-helper.json",
+    "lib/native-displaced-inventory-loader.sh",
+    "libexec/wapp-native-displaced-inventory-linux-x86_64.b64.txt",
+    "native/build-displaced-inventory-helper.sh",
+    "native/displaced-inventory-helper.c",
 }
 PRODUCT_PATHSPECS = (
     "VERSION", "wapp", "wapp-scan", "install.command", "update.command",
@@ -59,7 +64,8 @@ PRODUCT_PATHSPECS = (
     "lib/*.php", "lib/*.m", "config/canonical-components.txt",
     "config/provider-authenticators.json", "config/aws-custody-core.json",
     "config/aws-custody-production-policy.json.example",
-    "config/reviewer-trust-anchors.json",
+    "config/reviewer-trust-anchors.json", "config/native-filesystem-helper.json",
+    "native/*.c", "native/*.sh", "libexec/*.txt",
 )
 
 

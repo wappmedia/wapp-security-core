@@ -1,0 +1,236 @@
+#define _GNU_SOURCE
+#include <stdio.h>
+
+#if !defined(__linux__) || !defined(__x86_64__)
+int main(void) {
+    fputs("wapp-native-displaced-inventory: unsupported platform\n", stderr);
+    return 78;
+}
+#else
+
+#include <errno.h>
+#include <fcntl.h>
+#include <linux/openat2.h>
+#include <stdarg.h>
+#include <stddef.h>
+#include <signal.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/statfs.h>
+#include <sys/syscall.h>
+#include <sys/resource.h>
+#include <sys/types.h>
+#include <time.h>
+#include <unistd.h>
+
+#ifndef O_NOATIME
+#define O_NOATIME 01000000
+#endif
+#ifndef O_PATH
+#define O_PATH 010000000
+#endif
+#ifndef ST_NOATIME
+#define ST_NOATIME 0x0400
+#endif
+#ifndef ST_RDONLY
+#define ST_RDONLY 0x0001
+#endif
+
+enum {
+    ENTRY_CAP = 200000,
+    DIRECTORY_CAP = 50000,
+    FILE_CAP = 100000,
+    DEPTH_CAP = 64,
+    MAX_RELATIVE_BYTES = 4096,
+    MAX_SECONDS = 300,
+    IO_CHUNK = 1024 * 1024,
+};
+static const uint64_t MAX_FILE_BYTES = 1024ULL * 1024ULL * 1024ULL;
+static const uint64_t MAX_TOTAL_BYTES = 8ULL * 1024ULL * 1024ULL * 1024ULL;
+static const size_t MAX_OUTPUT_BYTES = 120ULL * 1024ULL * 1024ULL;
+static const size_t MAX_ROLLBACK_BYTES = 16ULL * 1024ULL * 1024ULL;
+static const char *RUNTIME_MODE = "PRODUCTION_RELEASE_PINNED_NATIVE_LINUX_X86_64_MEMFD_V1";
+static const char *RUNTIME_PATH = "memfd:wapp-native-displaced-inventory-linux-x86_64-v1";
+
+typedef struct { uint32_t h[8]; uint64_t bits; unsigned char block[64]; size_t used; } Sha256;
+static const uint32_t K[64] = {
+  0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+  0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+  0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+  0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+  0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+  0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+  0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+  0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+};
+static uint32_t rotr(uint32_t x, unsigned n){ return (x>>n)|(x<<(32-n)); }
+static void sha_block(Sha256 *s,const unsigned char *p){
+  uint32_t w[64],a,b,c,d,e,f,g,h,t1,t2; unsigned i;
+  for(i=0;i<16;i++) w[i]=((uint32_t)p[i*4]<<24)|((uint32_t)p[i*4+1]<<16)|((uint32_t)p[i*4+2]<<8)|p[i*4+3];
+  for(i=16;i<64;i++){uint32_t x=w[i-15],y=w[i-2];w[i]=(rotr(y,17)^rotr(y,19)^(y>>10))+w[i-7]+(rotr(x,7)^rotr(x,18)^(x>>3))+w[i-16];}
+  a=s->h[0];b=s->h[1];c=s->h[2];d=s->h[3];e=s->h[4];f=s->h[5];g=s->h[6];h=s->h[7];
+  for(i=0;i<64;i++){t1=h+(rotr(e,6)^rotr(e,11)^rotr(e,25))+((e&f)^((~e)&g))+K[i]+w[i];t2=(rotr(a,2)^rotr(a,13)^rotr(a,22))+((a&b)^(a&c)^(b&c));h=g;g=f;f=e;e=d+t1;d=c;c=b;b=a;a=t1+t2;}
+  s->h[0]+=a;s->h[1]+=b;s->h[2]+=c;s->h[3]+=d;s->h[4]+=e;s->h[5]+=f;s->h[6]+=g;s->h[7]+=h;
+}
+static void sha_init(Sha256 *s){static const uint32_t H[8]={0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19};memcpy(s->h,H,sizeof H);s->bits=0;s->used=0;}
+static void sha_update(Sha256 *s,const void *vp,size_t n){const unsigned char *p=vp;s->bits+=(uint64_t)n*8;while(n){size_t take=64-s->used;if(take>n)take=n;memcpy(s->block+s->used,p,take);s->used+=take;p+=take;n-=take;if(s->used==64){sha_block(s,s->block);s->used=0;}}}
+static void sha_final(Sha256 *s,unsigned char out[32]){unsigned i;s->block[s->used++]=0x80;if(s->used>56){while(s->used<64)s->block[s->used++]=0;sha_block(s,s->block);s->used=0;}while(s->used<56)s->block[s->used++]=0;for(i=0;i<8;i++)s->block[63-i]=(unsigned char)(s->bits>>(8*i));sha_block(s,s->block);for(i=0;i<8;i++){out[i*4]=(unsigned char)(s->h[i]>>24);out[i*4+1]=(unsigned char)(s->h[i]>>16);out[i*4+2]=(unsigned char)(s->h[i]>>8);out[i*4+3]=(unsigned char)s->h[i];}}
+static void hex32(const unsigned char in[32],char out[65]){static const char H[]="0123456789abcdef";for(int i=0;i<32;i++){out[i*2]=H[in[i]>>4];out[i*2+1]=H[in[i]&15];}out[64]=0;}
+static void digest(const void *p,size_t n,char out[65]){Sha256 s;unsigned char b[32];sha_init(&s);sha_update(&s,p,n);sha_final(&s,b);hex32(b,out);}
+
+typedef struct { char **v; size_t n,cap,bytes; } Lines;
+typedef struct { unsigned char *v; size_t n; } Bytes;
+typedef struct { dev_t dev; ino_t ino; } Identity;
+typedef struct { Identity *v; size_t n,cap; } Identities;
+typedef struct {
+  Lines rows,issues; Identities dirs; size_t entries,dirs_n,files,hashed,uploads,other;
+  uint64_t hashed_bytes; int stopped; time_t deadline; const char *requested_root; const char *runtime_sha; const char *runtime_identity;
+} Snapshot;
+
+static void die(const char *m){fprintf(stderr,"wapp-native-displaced-inventory: %s\n",m);exit(20);}
+static void alarm_exit(int unused){(void)unused;_exit(20);}
+static void apply_process_limits(void){struct rlimit memory={256ULL*1024ULL*1024ULL,256ULL*1024ULL*1024ULL},cpu={MAX_SECONDS+5,MAX_SECONDS+5},files={64,64};if(setrlimit(RLIMIT_AS,&memory)<0||setrlimit(RLIMIT_CPU,&cpu)<0||setrlimit(RLIMIT_NOFILE,&files)<0)die("process limits unavailable");signal(SIGALRM,alarm_exit);alarm(MAX_SECONDS);}
+static void *xmalloc(size_t n){void *p=malloc(n?n:1);if(!p)die("memory cap/allocation failure");return p;}
+static void check_deadline(Snapshot *s){if(time(NULL)>s->deadline)die("hard time cap exceeded");}
+static int cmpstr(const void *a,const void *b){return strcmp(*(char *const*)a,*(char *const*)b);}
+static int cmpbytes(const void *a,const void *b){const Bytes *x=a,*y=b;size_t m=x->n<y->n?x->n:y->n;int c=memcmp(x->v,y->v,m);return c?c:(x->n>y->n)-(x->n<y->n);}
+static void lines_add(Lines *l,char *value){size_t n=strlen(value)+1;if(l->bytes+n>MAX_OUTPUT_BYTES)die("output byte cap exceeded");if(l->n==l->cap){size_t c=l->cap?l->cap*2:256;if(c>ENTRY_CAP*3ULL)c=ENTRY_CAP*3ULL;if(c<=l->cap)die("line cap");l->v=realloc(l->v,c*sizeof(*l->v));if(!l->v)die("memory cap/allocation failure");l->cap=c;}l->v[l->n++]=value;l->bytes+=n;}
+static void lines_free(Lines *l){for(size_t i=0;i<l->n;i++)free(l->v[i]);free(l->v);memset(l,0,sizeof *l);}
+static char *hex_bytes(const unsigned char *p,size_t n){static const char H[]="0123456789abcdef";if(n>(SIZE_MAX-1)/2)die("hex overflow");char *o=xmalloc(n*2+1);for(size_t i=0;i<n;i++){o[i*2]=H[p[i]>>4];o[i*2+1]=H[p[i]&15];}o[n*2]=0;return o;}
+static char *fmt_alloc(const char *fmt,...){va_list ap,cp;va_start(ap,fmt);va_copy(cp,ap);int n=vsnprintf(NULL,0,fmt,cp);va_end(cp);if(n<0)die("serialization failure");char *p=xmalloc((size_t)n+1);vsnprintf(p,(size_t)n+1,fmt,ap);va_end(ap);return p;}
+static long long ns_time(struct timespec ts){return (long long)ts.tv_sec*1000000000LL+ts.tv_nsec;}
+static int same_stat(const struct stat *a,const struct stat *b){return a->st_dev==b->st_dev&&a->st_ino==b->st_ino&&a->st_mode==b->st_mode&&a->st_nlink==b->st_nlink&&a->st_uid==b->st_uid&&a->st_gid==b->st_gid&&a->st_rdev==b->st_rdev&&a->st_size==b->st_size&&a->st_blocks==b->st_blocks&&ns_time(a->st_mtim)==ns_time(b->st_mtim)&&ns_time(a->st_ctim)==ns_time(b->st_ctim);}
+static const char *kind(mode_t m){if(S_ISREG(m))return "REGULAR";if(S_ISDIR(m))return "DIRECTORY";if(S_ISLNK(m))return "SYMLINK";if(S_ISBLK(m))return "BLOCK_DEVICE";if(S_ISCHR(m))return "CHAR_DEVICE";if(S_ISFIFO(m))return "FIFO";if(S_ISSOCK(m))return "SOCKET";return "OTHER";}
+static int is_safe_component(const unsigned char *p,size_t n){return n&&!(n==1&&p[0]=='.')&&!(n==2&&p[0]=='.'&&p[1]=='.')&&!memchr(p,'/',n)&&!memchr(p,0,n);}
+static int open_component(int dirfd,const char *name,int flags,int *used_openat2){
+  struct open_how how={.flags=(uint64_t)flags,.resolve=RESOLVE_BENEATH|RESOLVE_NO_MAGICLINKS|RESOLVE_NO_SYMLINKS};
+  int fd=(int)syscall(SYS_openat2,dirfd,name,&how,sizeof how);
+  if(fd>=0){*used_openat2=1;return fd;}
+  if(errno!=ENOSYS&&errno!=EINVAL&&errno!=E2BIG)return -1;
+  fd=openat(dirfd,name,flags);if(fd>=0){struct stat st;if(fstat(fd,&st)<0){close(fd);return -1;}*used_openat2=0;}return fd;
+}
+static int open_root(const char *path,int *used_openat2){
+  const char *p=path;if(*p!='/')die("invalid physical root");int fd=open("/",O_PATH|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);if(fd<0)die("root descriptor unavailable");p++;
+  while(*p){const char *slash=strchr(p,'/');size_t n=slash?(size_t)(slash-p):strlen(p);if(!is_safe_component((const unsigned char*)p,n)){close(fd);die("unsafe physical root component");}char name[256];if(n>=sizeof name){close(fd);die("physical root component cap");}memcpy(name,p,n);name[n]=0;int final=!slash;int flags=final?(O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_NOATIME|O_CLOEXEC):(O_PATH|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);int nfd=open_component(fd,name,flags,used_openat2);if(nfd<0){close(fd);die(final?"atime-safe root open unavailable":"root traversal failed");}close(fd);fd=nfd;if(final)break;p=slash+1;}
+  return fd;
+}
+static void id_add(Snapshot *s,dev_t d,ino_t i){for(size_t x=0;x<s->dirs.n;x++)if(s->dirs.v[x].dev==d&&s->dirs.v[x].ino==i){return;}if(s->dirs.n==s->dirs.cap){size_t c=s->dirs.cap?s->dirs.cap*2:256;s->dirs.v=realloc(s->dirs.v,c*sizeof(*s->dirs.v));if(!s->dirs.v)die("identity allocation");s->dirs.cap=c;}s->dirs.v[s->dirs.n++]=(Identity){d,i};}
+static int id_seen(Snapshot *s,dev_t d,ino_t i){for(size_t x=0;x<s->dirs.n;x++)if(s->dirs.v[x].dev==d&&s->dirs.v[x].ino==i)return 1;return 0;}
+static void issue(Snapshot *s,const char *reason,const unsigned char *rel,size_t rn,const char *detail){char h[65];digest(detail,strlen(detail),h);char *rh=hex_bytes(rel,rn);lines_add(&s->issues,fmt_alloc("UNRESOLVED\t%s\t%s\t%s",reason,rh,h));free(rh);}
+
+struct linux_dirent64_local { uint64_t d_ino; int64_t d_off; unsigned short d_reclen; unsigned char d_type; char d_name[]; };
+static int read_names(Snapshot *s,int fd,const unsigned char *rel,size_t rn,Bytes **out,size_t *outn){
+  int dupfd=dup(fd);if(dupfd<0){issue(s,"DIRECTORY_READ_UNRESOLVED",rel,rn,"dup");return -1;}if(lseek(dupfd,0,SEEK_SET)<0){close(dupfd);issue(s,"DIRECTORY_READ_UNRESOLVED",rel,rn,"seek");return -1;}
+  Bytes *names=NULL;size_t n=0,cap=0;char buf[32768];
+  for(;;){check_deadline(s);int got=(int)syscall(SYS_getdents64,dupfd,buf,sizeof buf);if(got<0){close(dupfd);issue(s,"DIRECTORY_READ_UNRESOLVED",rel,rn,"getdents");goto bad;}if(got==0)break;for(int pos=0;pos<got;){struct linux_dirent64_local *d=(void*)(buf+pos);if(d->d_reclen<offsetof(struct linux_dirent64_local,d_name)+1||pos+d->d_reclen>got){close(dupfd);die("malformed getdents64");}size_t max=d->d_reclen-offsetof(struct linux_dirent64_local,d_name);size_t len=strnlen(d->d_name,max);if(len==max){close(dupfd);die("unterminated getdents64 name");}pos+=d->d_reclen;if((len==1&&d->d_name[0]=='.')||(len==2&&d->d_name[0]=='.'&&d->d_name[1]=='.'))continue;if(!is_safe_component((unsigned char*)d->d_name,len)){close(dupfd);issue(s,"UNSAFE_NAME_UNRESOLVED",rel,rn,"name");s->stopped=1;goto bad;}if(n>=ENTRY_CAP-s->entries){close(dupfd);issue(s,"ENTRY_CAP",rel,rn,"entries");s->stopped=1;goto bad;}if(n==cap){size_t c=cap?cap*2:64;names=realloc(names,c*sizeof(*names));if(!names)die("name allocation");cap=c;}names[n].v=xmalloc(len);memcpy(names[n].v,d->d_name,len);names[n].n=len;n++;}}
+  close(dupfd);
+  qsort(names,n,sizeof *names,cmpbytes);*out=names;*outn=n;return 0;
+bad:for(size_t i=0;i<n;i++)free(names[i].v);free(names);return -1;
+}
+static void names_free(Bytes *v,size_t n){for(size_t i=0;i<n;i++)free(v[i].v);free(v);}
+static int names_equal(Bytes *a,size_t an,Bytes *b,size_t bn){if(an!=bn)return 0;for(size_t i=0;i<an;i++)if(a[i].n!=b[i].n||memcmp(a[i].v,b[i].v,a[i].n))return 0;return 1;}
+static int has_uploads_component(const unsigned char *rel,size_t rn){size_t start=0;for(size_t i=0;i<=rn;i++)if(i==rn||rel[i]=='/'){if(i-start==7&&!memcmp(rel+start,"uploads",7))return 1;start=i+1;}return 0;}
+static char *join_bytes(const unsigned char *a,size_t an,const unsigned char *b,size_t bn,int slash,size_t *outn){size_t n=an+(slash?1:0)+bn;unsigned char *p=xmalloc(n+1);memcpy(p,a,an);if(slash)p[an]='/';memcpy(p+an+slash,b,bn);p[n]=0;*outn=n;return (char*)p;}
+static char *hash_regular(Snapshot *s,int parent,const char *name,const unsigned char *rel,size_t rn,const struct stat *before){
+  if((uint64_t)before->st_size>MAX_FILE_BYTES){issue(s,"FILE_BYTE_CAP",rel,rn,"size");return strdup("-");}if(s->hashed_bytes+(uint64_t)before->st_size>MAX_TOTAL_BYTES){issue(s,"TOTAL_BYTE_CAP",rel,rn,"total");return strdup("-");}
+  int used=0,fd=open_component(parent,name,O_RDONLY|O_NOFOLLOW|O_NOATIME|O_CLOEXEC,&used);if(fd<0){issue(s,"FILE_OPEN_UNRESOLVED",rel,rn,"open");return strdup("-");}struct stat opened,after,pathst;if(fstat(fd,&opened)<0||!same_stat(&opened,before)){close(fd);issue(s,"FILE_IDENTITY_RACE",rel,rn,"open");return strdup("-");}
+  Sha256 sh;sha_init(&sh);unsigned char *buf=xmalloc(IO_CHUNK);uint64_t count=0;for(;;){check_deadline(s);ssize_t n=read(fd,buf,IO_CHUNK);if(n<0){free(buf);close(fd);issue(s,"FILE_READ_UNRESOLVED",rel,rn,"read");return strdup("-");}if(!n)break;count+=(uint64_t)n;if(count>(uint64_t)before->st_size){free(buf);close(fd);issue(s,"FILE_GROWTH_RACE",rel,rn,"growth");return strdup("-");}sha_update(&sh,buf,(size_t)n);}free(buf);if(fstat(fd,&after)<0||fstatat(parent,name,&pathst,AT_SYMLINK_NOFOLLOW)<0||count!=(uint64_t)before->st_size||!same_stat(&opened,&after)||!same_stat(&after,&pathst)){close(fd);issue(s,"FILE_IDENTITY_RACE",rel,rn,"read");return strdup("-");}close(fd);unsigned char d[32];char *out=xmalloc(65);sha_final(&sh,d);hex32(d,out);s->hashed++;s->hashed_bytes+=count;return out;
+}
+static char *symlink_target(Snapshot *s,int parent,const char *name,const unsigned char *rel,size_t rn,const struct stat *before){
+  int fd=openat(parent,name,O_PATH|O_NOFOLLOW|O_CLOEXEC);if(fd<0){issue(s,"SYMLINK_TARGET_READ_UNRESOLVED",rel,rn,"open");return strdup("-");}struct stat opened,after,pathst;struct statfs fs;if(fstat(fd,&opened)<0||!same_stat(&opened,before)){close(fd);issue(s,"SYMLINK_IDENTITY_RACE",rel,rn,"open");return strdup("-");}if(fstatfs(fd,&fs)<0||!(fs.f_flags&(ST_RDONLY|ST_NOATIME))){close(fd);issue(s,"SYMLINK_TARGET_NOATIME_UNRESOLVED",rel,rn,"mount-flags");return strdup("-");}char buf[4097];ssize_t n=readlinkat(fd,"",buf,sizeof(buf)-1);if(n<0||n>4096){close(fd);issue(s,"SYMLINK_TARGET_READ_UNRESOLVED",rel,rn,"readlink");return strdup("-");}if(fstat(fd,&after)<0||fstatat(parent,name,&pathst,AT_SYMLINK_NOFOLLOW)<0||!same_stat(&opened,&after)||!same_stat(&after,&pathst)){close(fd);issue(s,"SYMLINK_IDENTITY_RACE",rel,rn,"readlink");return strdup("-");}close(fd);return hex_bytes((unsigned char*)buf,(size_t)n);
+}
+static void walk(Snapshot *s,int fd,const unsigned char *absolute,size_t an,const unsigned char *rel,size_t rn,int depth,const struct stat *before,int parent,const char *name){
+  if(s->stopped)return;check_deadline(s);if(s->entries>=ENTRY_CAP){issue(s,"ENTRY_CAP",rel,rn,"entries");s->stopped=1;return;}s->entries++;const char *type=kind(before->st_mode);int uploads=has_uploads_component(rel,rn);if(uploads)s->uploads++;if(S_ISDIR(before->st_mode))s->dirs_n++;else if(S_ISREG(before->st_mode))s->files++;else s->other++;
+  char *target=strdup("-"),*filehash=strdup("-");if(!target||!filehash)die("allocation");
+  if(S_ISLNK(before->st_mode)){free(target);target=symlink_target(s,parent,name,rel,rn,before);issue(s,"SYMLINK_UNRESOLVED",rel,rn,"no-follow");}
+  else if(S_ISREG(before->st_mode)){if(before->st_nlink!=1)issue(s,"HARDLINK_UNRESOLVED",rel,rn,"nlink");if(s->files>FILE_CAP){issue(s,"FILE_CAP",rel,rn,"files");s->stopped=1;}if(!s->stopped){free(filehash);filehash=hash_regular(s,parent,name,rel,rn,before);}}
+  else if(!S_ISDIR(before->st_mode))issue(s,"NONREGULAR_OBJECT_UNRESOLVED",rel,rn,type);
+  char *rh=hex_bytes(rel,rn),*ah=hex_bytes(absolute,an);lines_add(&s->rows,fmt_alloc("ENTRY\t%s\t%s\t%s\t%lld\t%03o\t%u\t%u\t%lld\t%lld\t%llu\t%llu\t%llu\t%s\t%s\t%d",rh,ah,type,(long long)before->st_size,(unsigned)(before->st_mode&07777),(unsigned)before->st_uid,(unsigned)before->st_gid,ns_time(before->st_mtim),ns_time(before->st_ctim),(unsigned long long)before->st_dev,(unsigned long long)before->st_ino,(unsigned long long)before->st_nlink,target,filehash,uploads));free(rh);free(ah);free(target);free(filehash);
+  if(!S_ISDIR(before->st_mode)||s->stopped)return;if(depth>DEPTH_CAP){issue(s,"DEPTH_CAP",rel,rn,"depth");return;}if(s->dirs_n>DIRECTORY_CAP){issue(s,"DIRECTORY_CAP",rel,rn,"dirs");s->stopped=1;return;}if(id_seen(s,before->st_dev,before->st_ino)){issue(s,"DIRECTORY_IDENTITY_REPEAT",rel,rn,"identity");return;}id_add(s,before->st_dev,before->st_ino);
+  Bytes *first=NULL,*last=NULL;size_t fn=0,ln=0;if(read_names(s,fd,rel,rn,&first,&fn)<0)return;
+  for(size_t i=0;i<fn&&!s->stopped;i++){size_t crn,can;char *cr=join_bytes(rel,rn,first[i].v,first[i].n,rn>0,&crn);char *ca=join_bytes(absolute,an,first[i].v,first[i].n,1,&can);if(crn>MAX_RELATIVE_BYTES){issue(s,"PATH_BYTE_CAP",(unsigned char*)cr,crn,"path");free(cr);free(ca);continue;}char nm[4097];if(first[i].n>=sizeof nm)die("name cap");memcpy(nm,first[i].v,first[i].n);nm[first[i].n]=0;struct stat child,final;if(fstatat(fd,nm,&child,AT_SYMLINK_NOFOLLOW)<0){issue(s,"ENTRY_STAT_UNRESOLVED",(unsigned char*)cr,crn,"stat");free(cr);free(ca);continue;}int cfd=-1;if(S_ISDIR(child.st_mode)){int used=0;cfd=open_component(fd,nm,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_NOATIME|O_CLOEXEC,&used);if(cfd<0){issue(s,"DIRECTORY_OPEN_UNRESOLVED",(unsigned char*)cr,crn,"open");free(cr);free(ca);continue;}struct stat op;if(fstat(cfd,&op)<0||!same_stat(&op,&child)){close(cfd);issue(s,"DIRECTORY_IDENTITY_RACE",(unsigned char*)cr,crn,"open");free(cr);free(ca);continue;}}
+    walk(s,cfd,(unsigned char*)ca,can,(unsigned char*)cr,crn,depth+1,&child,fd,nm);if(cfd>=0)close(cfd);if(fstatat(fd,nm,&final,AT_SYMLINK_NOFOLLOW)<0)issue(s,"ENTRY_FINAL_RACE",(unsigned char*)cr,crn,"stat");else if(!same_stat(&child,&final))issue(s,"ENTRY_IDENTITY_RACE",(unsigned char*)cr,crn,"changed");free(cr);free(ca);
+  }
+  if(!s->stopped&&read_names(s,fd,rel,rn,&last,&ln)==0&&!names_equal(first,fn,last,ln))issue(s,"DIRECTORY_IDENTITY_RACE",rel,rn,"changed");names_free(first,fn);names_free(last,ln);
+}
+static char *snapshot(const char *root,const char *runtime_sha,const char *runtime_identity){
+  Snapshot s={0};s.deadline=time(NULL)+MAX_SECONDS;s.requested_root=root;s.runtime_sha=runtime_sha;s.runtime_identity=runtime_identity;int used=0,fd=open_root(root,&used);struct stat rb,rp,ra;if(fstat(fd,&rb)<0||lstat(root,&rp)<0||!same_stat(&rb,&rp)||!S_ISDIR(rb.st_mode)){close(fd);die("physical root identity mismatch");}walk(&s,fd,(const unsigned char*)root,strlen(root),(const unsigned char*)"",0,0,&rb,-1,NULL);if(fstat(fd,&ra)<0||lstat(root,&rp)<0||!same_stat(&rb,&ra)||!same_stat(&ra,&rp))issue(&s,"ROOT_IDENTITY_RACE",(unsigned char*)"",0,"changed");close(fd);
+  qsort(s.rows.v,s.rows.n,sizeof(char*),cmpstr);qsort(s.issues.v,s.issues.n,sizeof(char*),cmpstr);size_t unique=0;for(size_t i=0;i<s.issues.n;i++){if(i&&strcmp(s.issues.v[i],s.issues.v[i-1])==0){free(s.issues.v[i]);continue;}s.issues.v[unique++]=s.issues.v[i];}s.issues.n=unique;
+  Sha256 inv;sha_init(&inv);for(size_t i=0;i<s.rows.n;i++){sha_update(&inv,s.rows.v[i],strlen(s.rows.v[i]));sha_update(&inv,"\n",1);}unsigned char db[32];char ih[65];sha_final(&inv,db);hex32(db,ih);
+  char *roothex=hex_bytes((unsigned char*)root,strlen(root));char ri[65];digest(runtime_identity,strlen(runtime_identity),ri);char *runtimehex=hex_bytes((unsigned char*)RUNTIME_PATH,strlen(RUNTIME_PATH));
+  Lines all={0};lines_add(&all,fmt_alloc("ROOT\t%s\t%s\t%llu\t%llu\t%03o\t%u\t%u\t%llu\t%lld\t%lld",roothex,roothex,(unsigned long long)rb.st_dev,(unsigned long long)rb.st_ino,(unsigned)(rb.st_mode&07777),(unsigned)rb.st_uid,(unsigned)rb.st_gid,(unsigned long long)rb.st_nlink,ns_time(rb.st_mtim),ns_time(rb.st_ctim)));lines_add(&all,fmt_alloc("RUNTIME\t%s\t%s\t%s\t%s",RUNTIME_MODE,runtimehex,runtime_sha,ri));
+  for(size_t i=0;i<s.rows.n;i++){lines_add(&all,s.rows.v[i]);s.rows.v[i]=NULL;}for(size_t i=0;i<s.issues.n;i++){lines_add(&all,s.issues.v[i]);s.issues.v[i]=NULL;}
+  lines_add(&all,fmt_alloc("SUMMARY\t%zu\t%zu\t%zu\t%zu\t%llu\t%zu\t%zu\t%zu\t%s\t%s\t200000\t50000\t100000\t1073741824\t8589934592\t64\t300\t4096\t125829120",s.entries,s.dirs_n,s.files,s.hashed,(unsigned long long)s.hashed_bytes,s.uploads,s.other,s.issues.n,(s.issues.n==0&&!s.stopped)?"true":"false",ih));qsort(all.v,all.n,sizeof(char*),cmpstr);
+  size_t total=0;for(size_t i=0;i<all.n;i++)total+=strlen(all.v[i])+1;if(total>MAX_OUTPUT_BYTES)die("final serialized output byte cap exceeded");char *out=xmalloc(total+1),*q=out;for(size_t i=0;i<all.n;i++){size_t n=strlen(all.v[i]);memcpy(q,all.v[i],n);q+=n;*q++='\n';}*q=0;
+  free(roothex);free(runtimehex);lines_free(&all);lines_free(&s.rows);lines_free(&s.issues);free(s.dirs.v);return out;
+}
+static int valid_sha(const char *s){if(strlen(s)!=64)return 0;for(int i=0;i<64;i++)if(!((s[i]>='0'&&s[i]<='9')||(s[i]>='a'&&s[i]<='f')))return 0;return 1;}
+static int valid_root(const char *s){
+  size_t n,components=0,start=1;
+  if(!s||s[0]!='/'||(n=strlen(s))<2||n>MAX_RELATIVE_BYTES||s[n-1]=='/')return 0;
+  for(size_t i=1;i<=n;i++)if(i==n||s[i]=='/'){
+    size_t length=i-start;
+    if(!is_safe_component((const unsigned char*)s+start,length)||++components>DEPTH_CAP)return 0;
+    start=i+1;
+  }
+  return components>0;
+}
+static int valid_nonce(const char *s){return valid_sha(s);}
+static void verify_self_fd(const char *text,const char *expected){char tail;long value;if(sscanf(text,"%ld%c",&value,&tail)!=1||value<3||value>1048576)die("invalid helper descriptor");int fd=(int)value;struct stat st;if(fstat(fd,&st)<0||!S_ISREG(st.st_mode)||st.st_size<=0||st.st_size>1048576)die("helper descriptor identity");int seals=fcntl(fd,F_GET_SEALS);if(seals<0||(seals&(F_SEAL_SEAL|F_SEAL_SHRINK|F_SEAL_GROW|F_SEAL_WRITE))!=(F_SEAL_SEAL|F_SEAL_SHRINK|F_SEAL_GROW|F_SEAL_WRITE))die("helper descriptor not sealed");Sha256 sh;sha_init(&sh);unsigned char buf[65536];off_t off=0;for(;;){ssize_t n=pread(fd,buf,sizeof buf,off);if(n<0)die("helper descriptor read");if(!n)break;sha_update(&sh,buf,(size_t)n);off+=n;if(off>1048576)die("helper descriptor cap");}if(off!=st.st_size)die("helper descriptor size drift");unsigned char raw[32];char actual[65];sha_final(&sh,raw);hex32(raw,actual);if(strcmp(actual,expected))die("helper SHA-256 mismatch");if(fcntl(fd,F_SETFD,FD_CLOEXEC)<0)die("helper descriptor close-on-exec");}
+static int nibble(char c){if(c>='0'&&c<='9')return c-'0';if(c>='a'&&c<='f')return c-'a'+10;return -1;}
+static unsigned char *decode_hex(const char *text,size_t *outn){size_t n=strlen(text);if(!n||(n&1)||n/2>MAX_RELATIVE_BYTES)return NULL;unsigned char *out=xmalloc(n/2+1);for(size_t i=0;i<n;i+=2){int a=nibble(text[i]),b=nibble(text[i+1]);if(a<0||b<0){free(out);return NULL;}out[i/2]=(unsigned char)((a<<4)|b);}out[n/2]=0;*outn=n/2;return out;}
+static char *selected_snapshot(const char *root,const char *relhex,const char *runtime_sha,const char *runtime_identity){
+  size_t rn=0;unsigned char *rel=decode_hex(relhex,&rn);if(!rel)die("invalid selected relative path");int used=0,rootfd=open_root(root,&used),parent=rootfd;size_t start=0;char final_name[4097]={0};
+  struct stat ancestors[DEPTH_CAP+1],root_path_before,root_path_after;size_t ancestor_count=1;Lines path_bindings={0};
+  if(fstat(rootfd,&ancestors[0])<0||lstat(root,&root_path_before)<0||!same_stat(&ancestors[0],&root_path_before))die("selected canonical root identity mismatch");
+  char *roothex=hex_bytes((const unsigned char*)root,strlen(root));
+  lines_add(&path_bindings,fmt_alloc("ROLLBACK_PATH\tROOT\t%s\t%03o\t%u\t%u\t%lld\t%lld\t%llu\t%llu\t%llu",roothex,(unsigned)(ancestors[0].st_mode&07777),(unsigned)ancestors[0].st_uid,(unsigned)ancestors[0].st_gid,ns_time(ancestors[0].st_mtim),ns_time(ancestors[0].st_ctim),(unsigned long long)ancestors[0].st_dev,(unsigned long long)ancestors[0].st_ino,(unsigned long long)ancestors[0].st_nlink));free(roothex);
+  for(size_t i=0;i<=rn;i++)if(i==rn||rel[i]=='/'){
+    size_t n=i-start;if(!is_safe_component(rel+start,n)||n>=sizeof final_name){if(parent!=rootfd)close(parent);close(rootfd);free(rel);die("unsafe selected path component");}
+    memcpy(final_name,rel+start,n);final_name[n]=0;
+    if(i<rn){
+      int next=open_component(parent,final_name,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_NOATIME|O_CLOEXEC,&used);
+      if(next<0||ancestor_count>DEPTH_CAP){if(next>=0)close(next);if(parent!=rootfd)close(parent);close(rootfd);free(rel);die("selected parent traversal failed");}
+      if(fstat(next,&ancestors[ancestor_count])<0){close(next);if(parent!=rootfd)close(parent);close(rootfd);free(rel);die("selected parent identity unavailable");}
+      char *ancestor_hex=hex_bytes(rel,i);
+      lines_add(&path_bindings,fmt_alloc("ROLLBACK_PATH\tANCESTOR\t%s\t%03o\t%u\t%u\t%lld\t%lld\t%llu\t%llu\t%llu",ancestor_hex,(unsigned)(ancestors[ancestor_count].st_mode&07777),(unsigned)ancestors[ancestor_count].st_uid,(unsigned)ancestors[ancestor_count].st_gid,ns_time(ancestors[ancestor_count].st_mtim),ns_time(ancestors[ancestor_count].st_ctim),(unsigned long long)ancestors[ancestor_count].st_dev,(unsigned long long)ancestors[ancestor_count].st_ino,(unsigned long long)ancestors[ancestor_count].st_nlink));free(ancestor_hex);
+      ancestor_count++;if(parent!=rootfd)close(parent);parent=next;
+    }
+    start=i+1;
+  }
+  struct stat before,opened,after,pathst,root_before,root_after;if(fstat(rootfd,&root_before)<0||fstatat(parent,final_name,&before,AT_SYMLINK_NOFOLLOW)<0||!S_ISREG(before.st_mode)||before.st_nlink!=1||(uint64_t)before.st_size>MAX_ROLLBACK_BYTES){if(parent!=rootfd)close(parent);close(rootfd);free(rel);die("selected target prestate invalid");}
+  int fd=open_component(parent,final_name,O_RDONLY|O_NOFOLLOW|O_NOATIME|O_CLOEXEC,&used);if(fd<0||fstat(fd,&opened)<0||!same_stat(&before,&opened)){if(fd>=0)close(fd);if(parent!=rootfd)close(parent);close(rootfd);free(rel);die("selected target atime-safe open failed");}
+  size_t size=(size_t)before.st_size;unsigned char *bytes=xmalloc(size?size:1);size_t off=0;while(off<size){ssize_t n=read(fd,bytes+off,size-off);if(n<=0){close(fd);if(parent!=rootfd)close(parent);close(rootfd);free(rel);free(bytes);die("selected target read failed");}off+=(size_t)n;}
+  unsigned char extra;
+  if(read(fd,&extra,1)!=0||fstat(fd,&after)<0||fstatat(parent,final_name,&pathst,AT_SYMLINK_NOFOLLOW)<0||fstat(rootfd,&root_after)<0||lstat(root,&root_path_after)<0||!same_stat(&opened,&after)||!same_stat(&after,&pathst)||!same_stat(&root_before,&root_after)||!same_stat(&root_after,&root_path_after)){close(fd);if(parent!=rootfd)close(parent);close(rootfd);free(rel);free(bytes);die("selected target drift");}
+  /* Reopen the canonical pathname and rewalk every parent after reading.  This
+     proves the bytes still belong to the current root mapping, not a detached
+     descriptor tree that was atomically substituted during capture. */
+  int verify_used=0,verify_root=open_root(root,&verify_used),verify_parent=verify_root;struct stat verify_stat;size_t verify_index=1;start=0;
+  if(fstat(verify_root,&verify_stat)<0||!same_stat(&verify_stat,&ancestors[0])){close(verify_root);close(fd);if(parent!=rootfd)close(parent);close(rootfd);free(rel);free(bytes);die("selected canonical root substituted");}
+  for(size_t i=0;i<=rn;i++)if(i==rn||rel[i]=='/'){
+    size_t n=i-start;memcpy(final_name,rel+start,n);final_name[n]=0;
+    if(i<rn){
+      int next=open_component(verify_parent,final_name,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_NOATIME|O_CLOEXEC,&verify_used);
+      if(next<0||verify_index>=ancestor_count||fstat(next,&verify_stat)<0||!same_stat(&verify_stat,&ancestors[verify_index])){if(next>=0)close(next);if(verify_parent!=verify_root)close(verify_parent);close(verify_root);close(fd);if(parent!=rootfd)close(parent);close(rootfd);free(rel);free(bytes);die("selected canonical ancestor substituted");}
+      verify_index++;if(verify_parent!=verify_root)close(verify_parent);verify_parent=next;
+    }
+    start=i+1;
+  }
+  if(verify_index!=ancestor_count||fstatat(verify_parent,final_name,&verify_stat,AT_SYMLINK_NOFOLLOW)<0||!same_stat(&verify_stat,&after)){if(verify_parent!=verify_root)close(verify_parent);close(verify_root);close(fd);if(parent!=rootfd)close(parent);close(rootfd);free(rel);free(bytes);die("selected canonical target substituted");}
+  if(verify_parent!=verify_root)close(verify_parent);close(verify_root);close(fd);if(parent!=rootfd)close(parent);close(rootfd);
+  char file_sha[65],identity_sha[65];digest(bytes,size,file_sha);digest(runtime_identity,strlen(runtime_identity),identity_sha);char *bytehex=hex_bytes(bytes,size),*absolute=fmt_alloc("%s/%s",root,rel),*abshex=hex_bytes((unsigned char*)absolute,strlen(absolute)),*runtimehex=hex_bytes((unsigned char*)RUNTIME_PATH,strlen(RUNTIME_PATH));
+  Lines all={0};lines_add(&all,fmt_alloc("ROLLBACK_RUNTIME\t%s\t%s\t%s\t%s",RUNTIME_MODE,runtimehex,runtime_sha,identity_sha));for(size_t i=0;i<path_bindings.n;i++)lines_add(&all,strdup(path_bindings.v[i]));lines_add(&all,fmt_alloc("SELECTED_ROLLBACK\t%s\t%s\t%zu\t%03o\t%u\t%u\t%lld\t%lld\t%llu\t%llu\t%llu\t%s\t%s",relhex,abshex,size,(unsigned)(before.st_mode&07777),(unsigned)before.st_uid,(unsigned)before.st_gid,ns_time(before.st_mtim),ns_time(before.st_ctim),(unsigned long long)before.st_dev,(unsigned long long)before.st_ino,(unsigned long long)before.st_nlink,file_sha,bytehex));
+  size_t outn=1;for(size_t i=0;i<all.n;i++)outn+=strlen(all.v[i])+1;char *out=xmalloc(outn),*cursor=out;for(size_t i=0;i<all.n;i++){size_t n=strlen(all.v[i]);memcpy(cursor,all.v[i],n);cursor+=n;*cursor++='\n';}*cursor=0;
+  free(rel);free(bytes);free(bytehex);free(absolute);free(abshex);free(runtimehex);lines_free(&path_bindings);lines_free(&all);return out;
+}
+int main(int argc,char **argv){
+  if(argc==2&&!strcmp(argv[1],"--platform-probe")){puts("SUPPORTED:linux-x86_64");return 0;}
+  apply_process_limits();if((argc!=7&&argc!=8)||!valid_root(argv[2])||!valid_nonce(argv[3])||!valid_sha(argv[4])||strlen(argv[5])>512)die("invalid bounded invocation");verify_self_fd(argv[6],argv[4]);
+  if(argc==7&&!strcmp(argv[1],"inventory")){char *first=snapshot(argv[2],argv[4],argv[5]);char *second=snapshot(argv[2],argv[4],argv[5]);if(strcmp(first,second))die("inventory drift between passes");printf("CAPTURE_NONCE\t%s\n%s",argv[3],first);free(first);free(second);return 0;}
+  if(argc==8&&!strcmp(argv[1],"rollback")){char *first=selected_snapshot(argv[2],argv[7],argv[4],argv[5]);char *second=selected_snapshot(argv[2],argv[7],argv[4],argv[5]);if(strcmp(first,second))die("selected target drift between passes");printf("CAPTURE_NONCE\t%s\n%s",argv[3],first);free(first);free(second);return 0;}
+  die("unsupported bounded mode");return 20;
+}
+#endif

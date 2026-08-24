@@ -14,6 +14,12 @@ printf 'example.test /var/www/example 192.0.2.42 synthetic-backdoor.php\n' > "$t
 python3 "$SCANNER" --root "$tmp/safe" --worktree-only >/dev/null
 pass synthetic_fixture
 
+mkdir -p "$tmp/infrastructure";printf 'https://ziglang.org/download/toolchain\n' > "$tmp/infrastructure/source.txt"
+python3 "$SCANNER" --root "$tmp/infrastructure" --worktree-only >/dev/null
+pass exact_infrastructure_domain
+printf 'https://mirror.%s/download/toolchain\n' 'ziglang.org' > "$tmp/infrastructure/source.txt"
+expect_fail infrastructure_subdomain python3 "$SCANNER" --root "$tmp/infrastructure" --worktree-only
+
 mkdir -p "$tmp/ip"; printf '203.0.%s.8\n' '114' > "$tmp/ip/value.txt"
 expect_fail customer_ip python3 "$SCANNER" --root "$tmp/ip" --worktree-only
 mkdir -p "$tmp/domain"; printf 'customer-site.%s\n' 'com' > "$tmp/domain/value.txt"

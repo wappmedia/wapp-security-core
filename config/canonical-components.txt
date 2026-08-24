@@ -9,3 +9,8 @@ lib/emergency-operator-v1.py
 lib/plugin-policy.py
 lib/recovery-integrity.sh
 config/reviewer-trust-anchors.json
+native/displaced-inventory-helper.c
+native/build-displaced-inventory-helper.sh
+lib/native-displaced-inventory-loader.sh
+libexec/wapp-native-displaced-inventory-linux-x86_64.b64.txt
+config/native-filesystem-helper.json

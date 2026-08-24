@@ -17,7 +17,8 @@ DOMAIN_LITERAL = re.compile(r"(?<![A-Za-z0-9.-])(?:[A-Za-z0-9-]+\.)+(?:com|net|o
 SECRET_ASSIGNMENT = re.compile(r"(?i)(?:password|passwd|secret|token|private[_-]?key|access[_-]?key)\s*[:=]\s*['\"][^'\"\n]{8,}['\"]")
 DISALLOWED_PATH = re.compile(r"/(?:Users|private/var|var/folders)/[A-Za-z0-9._-]+/")
 ALLOWED_DOCUMENTATION_NETS = ("192.0.2.", "198.51.100.", "203.0.113.")
-TEXT_SUFFIXES = {"", ".bash", ".json", ".md", ".py", ".sh", ".txt", ".yml", ".yaml"}
+ALLOWED_INFRASTRUCTURE_DOMAINS = {"ziglang.org"}
+TEXT_SUFFIXES = {"", ".bash", ".c", ".json", ".md", ".py", ".sh", ".txt", ".yml", ".yaml"}
 
 
 def tracked_files(root: Path) -> list[Path]:
@@ -64,7 +65,8 @@ def scan_blob(relative: str, raw: bytes, *, display: str | None = None) -> list[
         if valid_ipv4(value) and not value.startswith(ALLOWED_DOCUMENTATION_NETS):
             findings.append(f"{label}: non-documentation IPv4 literal: {value}")
     for match in DOMAIN_LITERAL.finditer(text):
-        findings.append(f"{label}: non-synthetic domain literal: {match.group(0)}")
+        if match.group(0).lower() not in ALLOWED_INFRASTRUCTURE_DOMAINS:
+            findings.append(f"{label}: non-synthetic domain literal: {match.group(0)}")
     return findings
 
 
