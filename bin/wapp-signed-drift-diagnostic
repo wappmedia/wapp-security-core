@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.."&&pwd)"
+MODEL="$ROOT/lib/native-drift-diagnostic.py"
+source "$ROOT/lib/recovery-integrity.sh"
+fail(){ printf 'signed-drift-diagnostic: %s\n' "$1" >&2;exit 20; }
+PYTHON="$(recovery_trusted_fixed_python)"||fail 'trusted local Python unavailable'
+
+case "${1:-}" in
+  create)
+    [[ $# -eq 13&&"${2:-}" == --raw&&"${4:-}" == --root&&"${6:-}" == --operation-id&&"${8:-}" == --observed-at&&"${10:-}" == --product-seal&&"${12:-}" == --output ]]||fail 'invalid create invocation'
+    raw="$3";root="$5";operation="$7";observed_at="$9";product_seal="${11}";output="${13}"
+    [[ "$raw" == /*&&"$product_seal" == /*&&"$output" == /*&&! -e "$output"&&! -L "$output"&&! -e "$output.hmac"&&! -L "$output.hmac" ]]||fail 'invalid absolute input/output'
+    recovery_verify_file "$product_seal" "$product_seal.hmac"||fail 'Product Seal signature invalid'
+    tmp="$(mktemp -d 2>/dev/null||mktemp -d -t wapp-drift-diagnostic)";trap 'rm -rf "$tmp"' EXIT
+    PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$MODEL" create "$raw" "$root" "$operation" "$observed_at" "$product_seal" "$tmp/artifact.json"||fail 'raw diagnostic verification failed'
+    recovery_sign_file "$tmp/artifact.json" "$tmp/artifact.json.hmac" >/dev/null||fail 'diagnostic signing failed'
+    mv "$tmp/artifact.json" "$output";mv "$tmp/artifact.json.hmac" "$output.hmac";trap - EXIT;rmdir "$tmp"
+    printf 'SIGNED_DRIFT_DIAGNOSTIC_CREATED: %s\n' "$output"
+    ;;
+  verify)
+    [[ $# -eq 3&&"${2:-}" == --artifact&&"${3:-}" == /* ]]||fail 'invalid verify invocation'
+    recovery_verify_file "$3" "$3.hmac"||fail 'diagnostic signature invalid'
+    product_seal="$(PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$MODEL" product-seal-path "$3")"||fail 'Product Seal binding invalid'
+    recovery_verify_file "$product_seal" "$product_seal.hmac"||fail 'Product Seal signature invalid'
+    PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$MODEL" verify "$3"||fail 'diagnostic derivation invalid'
+    ;;
+  *) fail 'usage: wapp-signed-drift-diagnostic create|verify';;
+esac

@@ -84,6 +84,13 @@ typedef struct { char **v; size_t n,cap,bytes; } Lines;
 typedef struct { unsigned char *v; size_t n; } Bytes;
 typedef struct { dev_t dev; ino_t ino; } Identity;
 typedef struct { Identity *v; size_t n,cap; } Identities;
+typedef struct { char *storage; char *field[16]; } DiagnosticEntry;
+typedef struct { DiagnosticEntry *v; size_t n,cap; } DiagnosticEntries;
+typedef struct { char *key,*storage; char *field[4]; } DiagnosticIssue;
+typedef struct { DiagnosticIssue *v; size_t n,cap; } DiagnosticIssues;
+static int nibble(char c);
+static unsigned char *decode_hex(const char *text,size_t *outn);
+static int valid_sha(const char *s);
 typedef struct {
   Lines rows,issues; Identities dirs; size_t entries,dirs_n,files,hashed,uploads,other;
   uint64_t hashed_bytes; int stopped; time_t deadline; const char *requested_root; const char *runtime_sha; const char *runtime_identity;
@@ -166,6 +173,89 @@ static char *snapshot(const char *root,const char *runtime_sha,const char *runti
   size_t total=0;for(size_t i=0;i<all.n;i++)total+=strlen(all.v[i])+1;if(total>MAX_OUTPUT_BYTES)die("final serialized output byte cap exceeded");char *out=xmalloc(total+1),*q=out;for(size_t i=0;i<all.n;i++){size_t n=strlen(all.v[i]);memcpy(q,all.v[i],n);q+=n;*q++='\n';}*q=0;
   free(roothex);free(runtimehex);lines_free(&all);lines_free(&s.rows);lines_free(&s.issues);free(s.dirs.v);return out;
 }
+static size_t split_tabs(char *line,char **field,size_t cap){
+  size_t n=0;char *p=line;
+  if(!cap)return 0;field[n++]=p;
+  while(*p){if(*p=='\t'){*p=0;if(n>=cap)return cap+1;field[n++]=p+1;}p++;}
+  return n;
+}
+static int canonical_relhex(const char *text){
+  size_t n=strlen(text);if(n&1)return 0;
+  for(size_t i=0;i<n;i++)if(nibble(text[i])<0)return 0;
+  if(!n)return 1;
+  size_t raw_n=0;unsigned char *raw=decode_hex(text,&raw_n);if(!raw)return 0;
+  size_t start=0;int ok=1;
+  for(size_t i=0;i<=raw_n;i++)if(i==raw_n||raw[i]=='/'){
+    if(!is_safe_component(raw+start,i-start)){ok=0;break;}start=i+1;
+  }
+  free(raw);return ok;
+}
+static void diagnostic_entries_add(DiagnosticEntries *entries,char *line){
+  if(entries->n==entries->cap){size_t next=entries->cap?entries->cap*2:256;if(next>ENTRY_CAP)next=ENTRY_CAP;if(next<=entries->cap)die("diagnostic entry cap");entries->v=realloc(entries->v,next*sizeof(*entries->v));if(!entries->v)die("diagnostic allocation");entries->cap=next;}
+  DiagnosticEntry *entry=&entries->v[entries->n++];memset(entry,0,sizeof *entry);entry->storage=strdup(line);if(!entry->storage)die("diagnostic allocation");
+  if(split_tabs(entry->storage,entry->field,16)!=16||strcmp(entry->field[0],"ENTRY")||!canonical_relhex(entry->field[1]))die("diagnostic source entry invalid");
+  if(entries->n>1&&strcmp(entries->v[entries->n-2].field[1],entry->field[1])>=0)die("diagnostic source ordering invalid");
+}
+static void diagnostic_entries_free(DiagnosticEntries *entries){for(size_t i=0;i<entries->n;i++)free(entries->v[i].storage);free(entries->v);memset(entries,0,sizeof *entries);}
+static void diagnostic_issues_add(DiagnosticIssues *issues,char *line){
+  if(issues->n==issues->cap){size_t next=issues->cap?issues->cap*2:64;if(next>ENTRY_CAP)next=ENTRY_CAP;if(next<=issues->cap)die("diagnostic issue cap");issues->v=realloc(issues->v,next*sizeof(*issues->v));if(!issues->v)die("diagnostic allocation");issues->cap=next;}
+  DiagnosticIssue *issue=&issues->v[issues->n++];memset(issue,0,sizeof *issue);issue->key=strdup(line);issue->storage=strdup(line);if(!issue->key||!issue->storage)die("diagnostic allocation");
+  if(split_tabs(issue->storage,issue->field,4)!=4||strcmp(issue->field[0],"UNRESOLVED")||!canonical_relhex(issue->field[2])||!valid_sha(issue->field[3]))die("diagnostic source issue invalid");
+  if(issues->n>1&&strcmp(issues->v[issues->n-2].key,issue->key)>=0)die("diagnostic issue ordering invalid");
+}
+static void diagnostic_issues_free(DiagnosticIssues *issues){for(size_t i=0;i<issues->n;i++){free(issues->v[i].key);free(issues->v[i].storage);}free(issues->v);memset(issues,0,sizeof *issues);}
+static void parse_diagnostic_snapshot(const char *snapshot_text,DiagnosticEntries *entries,DiagnosticIssues *issues,char root[11][8193],char runtime[5][1025]){
+  char *copy=strdup(snapshot_text);if(!copy)die("diagnostic allocation");int root_seen=0,runtime_seen=0;char *save=NULL;
+  for(char *line=strtok_r(copy,"\n",&save);line;line=strtok_r(NULL,"\n",&save)){
+    if(!strncmp(line,"ENTRY\t",6)){diagnostic_entries_add(entries,line);continue;}
+    if(!strncmp(line,"UNRESOLVED\t",11)){diagnostic_issues_add(issues,line);continue;}
+    if(!strncmp(line,"ROOT\t",5)){
+      if(root_seen++)die("diagnostic duplicate root");char *field[11];if(split_tabs(line,field,11)!=11)die("diagnostic root invalid");
+      for(size_t i=0;i<11;i++){if(strlen(field[i])>=8193)die("diagnostic root field cap");strcpy(root[i],field[i]);}
+    }else if(!strncmp(line,"RUNTIME\t",8)){
+      if(runtime_seen++)die("diagnostic duplicate runtime");char *field[5];if(split_tabs(line,field,5)!=5)die("diagnostic runtime invalid");
+      for(size_t i=0;i<5;i++){if(strlen(field[i])>=1025)die("diagnostic runtime field cap");strcpy(runtime[i],field[i]);}
+    }
+  }
+  free(copy);if(root_seen!=1||runtime_seen!=1||strcmp(root[0],"ROOT")||strcmp(runtime[0],"RUNTIME"))die("diagnostic snapshot binding missing");
+}
+static const char *diagnostic_change(const DiagnosticEntry *first,const DiagnosticEntry *second){
+  if(!first)return "CREATED";if(!second)return "DELETED";
+  if(strcmp(first->field[3],second->field[3])||strcmp(first->field[10],second->field[10])||strcmp(first->field[11],second->field[11]))return "REPLACED";
+  return "MODIFIED";
+}
+static int diagnostic_entry_equal(const DiagnosticEntry *first,const DiagnosticEntry *second){for(size_t i=0;i<16;i++)if(strcmp(first->field[i],second->field[i]))return 0;return 1;}
+static const char *diagnostic_value(const DiagnosticEntry *entry,size_t field){return entry?entry->field[field]:"-";}
+static char *diagnostic_delta(const char *first_text,const char *second_text,const char *nonce,const char *helper_sha,const char *runtime_identity){
+  if(!strcmp(first_text,second_text))die("diagnostic mode requires two-pass mismatch");
+  DiagnosticEntries first={0},second={0};DiagnosticIssues first_issues={0},second_issues={0};char root1[11][8193]={{0}},root2[11][8193]={{0}},runtime1[5][1025]={{0}},runtime2[5][1025]={{0}};
+  parse_diagnostic_snapshot(first_text,&first,&first_issues,root1,runtime1);parse_diagnostic_snapshot(second_text,&second,&second_issues,root2,runtime2);
+  if(strcmp(root1[1],root2[1])||strcmp(runtime1[1],runtime2[1])||strcmp(runtime1[2],runtime2[2])||strcmp(runtime1[3],helper_sha)||strcmp(runtime2[3],helper_sha)||strcmp(runtime1[4],runtime2[4]))die("diagnostic snapshot identity mismatch");
+  char first_sha[65],second_sha[65];digest(first_text,strlen(first_text),first_sha);digest(second_text,strlen(second_text),second_sha);
+  Lines deltas={0};size_t i=0,j=0;
+  while(i<first.n||j<second.n){
+    DiagnosticEntry *a=i<first.n?&first.v[i]:NULL,*b=j<second.n?&second.v[j]:NULL;int order=a&&b?strcmp(a->field[1],b->field[1]):(a?-1:1);
+    if(order==0&&diagnostic_entry_equal(a,b)){i++;j++;continue;}
+    DiagnosticEntry *left=order<=0?a:NULL,*right=order>=0?b:NULL;const char *path=left?left->field[1]:right->field[1];
+    lines_add(&deltas,fmt_alloc("DRIFT\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s",path,diagnostic_change(left,right),left?"true":"false",right?"true":"false",diagnostic_value(left,3),diagnostic_value(left,10),diagnostic_value(left,11),diagnostic_value(left,4),diagnostic_value(left,5),diagnostic_value(left,6),diagnostic_value(left,7),diagnostic_value(left,12),diagnostic_value(left,8),diagnostic_value(left,9),diagnostic_value(left,14),diagnostic_value(left,13),diagnostic_value(left,15),diagnostic_value(right,3),diagnostic_value(right,10),diagnostic_value(right,11),diagnostic_value(right,4),diagnostic_value(right,5),diagnostic_value(right,6),diagnostic_value(right,7),diagnostic_value(right,12),diagnostic_value(right,8),diagnostic_value(right,9),diagnostic_value(right,14),diagnostic_value(right,13),diagnostic_value(right,15)));
+    if(order<=0)i++;if(order>=0)j++;
+  }
+  Lines issue_deltas={0};i=0;j=0;
+  while(i<first_issues.n||j<second_issues.n){
+    DiagnosticIssue *a=i<first_issues.n?&first_issues.v[i]:NULL,*b=j<second_issues.n?&second_issues.v[j]:NULL;int order=a&&b?strcmp(a->key,b->key):(a?-1:1);
+    if(order==0){i++;j++;continue;}
+    DiagnosticIssue *issue=order<0?a:b;lines_add(&issue_deltas,fmt_alloc("DRIFT_ISSUE\t%s\t%s\t%s\t%s\t%s",issue->field[2],issue->field[1],issue->field[3],order<0?"true":"false",order>0?"true":"false"));if(order<0)i++;else j++;
+  }
+  if(deltas.n>ENTRY_CAP||issue_deltas.n>ENTRY_CAP||deltas.n+issue_deltas.n==0)die("diagnostic mismatch not fully explainable");
+  char *runtime_identity_sha=runtime1[4],*runtime_identity_hex=hex_bytes((unsigned char*)runtime_identity,strlen(runtime_identity));Lines output={0};
+  lines_add(&output,fmt_alloc("CAPTURE_NONCE\t%s",nonce));
+  lines_add(&output,fmt_alloc("DRIFT_DIAGNOSTIC\tSIGNED_DRIFT_DIAGNOSTIC_MODE_V1\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%zu\t%zu\t%s\t%s",root1[1],root1[3],root1[4],root2[3],root2[4],first_sha,second_sha,helper_sha,runtime_identity_sha,runtime_identity_hex,deltas.n,issue_deltas.n,"READ_ONLY","NON_AUTHORIZING"));
+  for(size_t k=0;k<deltas.n;k++){lines_add(&output,deltas.v[k]);deltas.v[k]=NULL;}
+  for(size_t k=0;k<issue_deltas.n;k++){lines_add(&output,issue_deltas.v[k]);issue_deltas.v[k]=NULL;}
+  size_t total=1;for(size_t k=0;k<output.n;k++)total+=strlen(output.v[k])+1;if(total>MAX_OUTPUT_BYTES)die("diagnostic serialized output cap");char *serialized=xmalloc(total),*cursor=serialized;
+  for(size_t k=0;k<output.n;k++){size_t n=strlen(output.v[k]);memcpy(cursor,output.v[k],n);cursor+=n;*cursor++='\n';}*cursor=0;
+  free(runtime_identity_hex);lines_free(&deltas);lines_free(&issue_deltas);lines_free(&output);diagnostic_entries_free(&first);diagnostic_entries_free(&second);diagnostic_issues_free(&first_issues);diagnostic_issues_free(&second_issues);return serialized;
+}
 static int valid_sha(const char *s){if(strlen(s)!=64)return 0;for(int i=0;i<64;i++)if(!((s[i]>='0'&&s[i]<='9')||(s[i]>='a'&&s[i]<='f')))return 0;return 1;}
 static int valid_root(const char *s){
   size_t n,components=0,start=1;
@@ -230,6 +320,7 @@ int main(int argc,char **argv){
   if(argc==2&&!strcmp(argv[1],"--platform-probe")){puts("SUPPORTED:linux-x86_64");return 0;}
   apply_process_limits();if((argc!=7&&argc!=8)||!valid_root(argv[2])||!valid_nonce(argv[3])||!valid_sha(argv[4])||strlen(argv[5])>512)die("invalid bounded invocation");verify_self_fd(argv[6],argv[4]);
   if(argc==7&&!strcmp(argv[1],"inventory")){char *first=snapshot(argv[2],argv[4],argv[5]);char *second=snapshot(argv[2],argv[4],argv[5]);if(strcmp(first,second))die("inventory drift between passes");printf("CAPTURE_NONCE\t%s\n%s",argv[3],first);free(first);free(second);return 0;}
+  if(argc==7&&!strcmp(argv[1],"diagnostic")){char *first=snapshot(argv[2],argv[4],argv[5]);char *second=snapshot(argv[2],argv[4],argv[5]);char *delta=diagnostic_delta(first,second,argv[3],argv[4],argv[5]);fputs(delta,stdout);free(delta);free(first);free(second);return 0;}
   if(argc==8&&!strcmp(argv[1],"rollback")){char *first=selected_snapshot(argv[2],argv[7],argv[4],argv[5]);char *second=selected_snapshot(argv[2],argv[7],argv[4],argv[5]);if(strcmp(first,second))die("selected target drift between passes");printf("CAPTURE_NONCE\t%s\n%s",argv[3],first);free(first);free(second);return 0;}
   die("unsupported bounded mode");return 20;
 }

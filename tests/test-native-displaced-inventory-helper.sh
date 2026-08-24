@@ -18,11 +18,12 @@ for path in "$SOURCE" "$ARTIFACT" "$POLICY" "$LOADER";do [[ -f "$path"&&! -L "$p
 import base64,hashlib,json,pathlib,sys
 policy,artifact,output=map(pathlib.Path,sys.argv[1:])
 value=json.loads(policy.read_text(encoding='utf-8'))
-expected={'tool','schema','platform','runtime_mode','loader_path','encoded_path','encoded_sha256','encoded_bytes','binary_sha256','binary_bytes','artifact_encoding','build_tool','root_contract'}
-assert set(value)==expected and value['tool']=='wapp-security-native-filesystem-helper-policy' and value['schema']==1
+expected={'tool','schema','platform','runtime_mode','loader_path','encoded_path','encoded_sha256','encoded_bytes','binary_sha256','binary_bytes','artifact_encoding','build_tool','root_contract','capture_modes','diagnostic_contract'}
+assert set(value)==expected and value['tool']=='wapp-security-native-filesystem-helper-policy' and value['schema']==2
 assert value['platform']=='linux-x86_64' and value['loader_path']=='/usr/bin/perl'
 assert value['runtime_mode']=='PRODUCTION_RELEASE_PINNED_NATIVE_LINUX_X86_64_MEMFD_V1'
 assert value['root_contract']=='PROVIDER_NEUTRAL_ABSOLUTE_DESCRIPTOR_ROOT_V1'
+assert value['capture_modes']==['diagnostic','inventory','rollback'] and value['diagnostic_contract']=='SIGNED_DRIFT_DIAGNOSTIC_MODE_V1'
 assert value['encoded_path']=='libexec/wapp-native-displaced-inventory-linux-x86_64.b64.txt'
 assert value['artifact_encoding']=='base64-rfc4648-no-wrap-v1' and value['build_tool']=='zig-0.15.2'
 encoded=artifact.read_bytes();raw=base64.b64decode(encoded.strip(),validate=True)
@@ -156,4 +157,42 @@ import base64,pathlib,sys
 loader,binary,output=map(pathlib.Path,sys.argv[1:]);marker=b'__WAPP_NATIVE_HELPER_BASE64_PAYLOAD__';raw=loader.read_bytes();output.write_bytes(raw.replace(marker,base64.b64encode(binary.read_bytes())));output.chmod(0o700)
 PY
 expect_fail helper_substitution /bin/bash "$TMP/substituted-probe" "$TEST_ROOT" "$NONCE" "$BINARY_SHA" "$BINARY_BYTES" inventory ''
+
+# The diagnostic mode preserves the ordinary inventory failure and emits only
+# a bounded metadata/hash delta for the same two descriptor-bound passes.
+truncate -s 536870912 "$TEST_ROOT/z-drift-slow.bin"
+printf 'delete-before\n' >"$TEST_ROOT/a-delete.php"
+printf 'modify-before\n' >"$TEST_ROOT/b-modify.php"
+printf 'replace-before\n' >"$TEST_ROOT/c-replace.php"
+(
+  sleep 0.2
+  rm -- "$TEST_ROOT/a-delete.php"
+  printf 'modify-after\n' >"$TEST_ROOT/b-modify.php"
+  printf 'replace-after\n' >"$TEST_ROOT/c-replacement.tmp"
+  mv -- "$TEST_ROOT/c-replacement.tmp" "$TEST_ROOT/c-replace.php"
+  printf 'create-after\n' >"$TEST_ROOT/d-create.php"
+) & mutator=$!
+/bin/bash "$TMP/probe" "$TEST_ROOT" "$NONCE" "$BINARY_SHA" "$BINARY_BYTES" diagnostic '' >"$TMP/diagnostic.tsv"
+wait "$mutator"
+/usr/bin/python3 - "$TMP/diagnostic.tsv" <<'PY'
+import sys
+lines=open(sys.argv[1],encoding='ascii').read().splitlines()
+assert lines[0].startswith('CAPTURE_NONCE\t')
+header=lines[1].split('\t')
+assert len(header)==16 and header[0:2]==['DRIFT_DIAGNOSTIC','SIGNED_DRIFT_DIAGNOSTIC_MODE_V1']
+assert header[-2:]==['READ_ONLY','NON_AUTHORIZING']
+deltas={bytes.fromhex(row[1]):row for row in (line.split('\t') for line in lines[2:] if line.startswith('DRIFT\t'))}
+assert deltas[b'a-delete.php'][2]=='DELETED'
+assert deltas[b'b-modify.php'][2]=='MODIFIED'
+assert deltas[b'c-replace.php'][2]=='REPLACED'
+assert deltas[b'd-create.php'][2]=='CREATED'
+assert int(header[12])==len(deltas)
+assert int(header[13])==sum(line.startswith('DRIFT_ISSUE\t') for line in lines)
+assert all(len(row)==31 for row in deltas.values())
+assert any(line.startswith('DRIFT_ISSUE\t') for line in lines)
+assert not any('before' in line or 'after' in line for line in lines)
+PY
+expect_fail stable_diagnostic /bin/bash "$TMP/probe" "$TEST_ROOT" "$NONCE" "$BINARY_SHA" "$BINARY_BYTES" diagnostic ''
+run_inventory >"$TMP/post-drift-stable.tsv"
+rm "$TEST_ROOT/z-drift-slow.bin"
 printf 'PASS: provider-neutral native helper enforces descriptor/no-follow/no-atime/two-pass/rollback contracts\n'

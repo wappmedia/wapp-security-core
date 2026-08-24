@@ -88,8 +88,8 @@ hash_text(){ local value;value="$(LC_ALL=C "$OPENSSL" dgst -sha256 2>/dev/null)"
 target_root="${1:-}";capture_nonce="${2:-}";native_sha="${3:-}";native_bytes="${4:-}";capture_mode="${5:-inventory}";selected_rel_hex="${6:-}"
 [[ "$target_root" == /*&&"$target_root" != /&&${#target_root} -le 4096&&"$target_root" != */&&"$target_root" != *//* ]]||fail 'invalid bounded target'
 IFS=/ read -r -a root_parts <<<"${target_root#/}";for part in "${root_parts[@]}";do [[ -n "$part"&&"$part" != .&&"$part" != .. ]]||fail 'unsafe target component';done
-[[ "$capture_nonce" =~ ^[a-f0-9]{64}$&&"$native_sha" == d073caf84d2674ff8e8dcdec75b4e4862a53498448532687340d2f8718a5c70a&&"$native_bytes" == 75384 ]]||fail 'invalid release binding'
-[[ "$capture_mode" == inventory&&-z "$selected_rel_hex"||"$capture_mode" == rollback&&"$selected_rel_hex" =~ ^[a-f0-9]{2,8192}$&&$((${#selected_rel_hex}%2)) -eq 0 ]]||fail 'invalid bounded capture mode'
+[[ "$capture_nonce" =~ ^[a-f0-9]{64}$&&"$native_sha" == 8a02bd728929c50a201ed3f322dfee1c3bf7cf424c21b13f47b6ab7069c91fb5&&"$native_bytes" == 84376 ]]||fail 'invalid release binding'
+[[ ( "$capture_mode" == inventory||"$capture_mode" == diagnostic )&&-z "$selected_rel_hex"||"$capture_mode" == rollback&&"$selected_rel_hex" =~ ^[a-f0-9]{2,8192}$&&$((${#selected_rel_hex}%2)) -eq 0 ]]||fail 'invalid bounded capture mode'
 for tool in "$STAT" "$OPENSSL" "$MKDIR" "$CHMOD" "$RM" "$RMDIR";do trusted_file "$tool"||fail 'trusted base tools unavailable';done
 [[ -d "$target_root"&&! -L "$target_root" ]]||fail 'exact target root unavailable'
 
