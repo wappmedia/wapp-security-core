@@ -7,9 +7,10 @@ cd "$ROOT"
 /bin/bash -n wapp bin/wapp bin/wapp-closure-check bin/wapp-emergency-clean \
   bin/wapp-package-audit bin/wapp-plugin-policy bin/wapp-product-seal bin/wapp-public-data-boundary \
   bin/wapp-release-check bin/wapp-test lib/recovery-integrity.sh lib/native-displaced-inventory-loader.sh \
-  native/build-displaced-inventory-helper.sh tests/test-emergency-operator-v1.sh tests/test-external-reviewer-trust.sh \
+  lib/native-displaced-inventory-ephemeral-loader.sh native/build-displaced-inventory-helper.sh \
+  native/build-ephemeral-memfd-launcher.sh tests/test-emergency-operator-v1.sh tests/test-external-reviewer-trust.sh \
   tests/test-file-manager-for-work-policy.sh tests/test-native-displaced-inventory-helper.sh \
-  tests/test-native-displaced-inventory-reproducible-build.sh tests/test-public-data-boundary.sh
+  tests/test-native-displaced-inventory-reproducible-build.sh tests/test-native-ephemeral-bootstrap.sh tests/test-public-data-boundary.sh
 python3 - <<'PY'
 from pathlib import Path
 for name in ("lib/emergency-operator-v1.py", "lib/plugin-policy.py", "tests/public-data-boundary.py"):
@@ -20,6 +21,7 @@ PY
 /bin/bash tests/test-file-manager-for-work-policy.sh
 /bin/bash tests/test-native-displaced-inventory-helper.sh
 /bin/bash tests/test-native-displaced-inventory-reproducible-build.sh
+/bin/bash tests/test-native-ephemeral-bootstrap.sh
 /bin/bash tests/test-public-data-boundary.sh
 
 printf 'PUBLIC_CORE_TESTS: PASS\n'

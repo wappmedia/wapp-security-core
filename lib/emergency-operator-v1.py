@@ -57,6 +57,11 @@ REQUIRED_PRODUCT_COMPONENTS = {
     "libexec/wapp-native-displaced-inventory-linux-x86_64.b64.txt",
     "native/build-displaced-inventory-helper.sh",
     "native/displaced-inventory-helper.c",
+    "config/native-ephemeral-bootstrap.json",
+    "lib/native-displaced-inventory-ephemeral-loader.sh",
+    "libexec/wapp-native-ephemeral-memfd-launcher-linux-x86_64.b64.txt",
+    "native/build-ephemeral-memfd-launcher.sh",
+    "native/ephemeral-memfd-launcher.c",
 }
 PRODUCT_PATHSPECS = (
     "VERSION", "wapp", "wapp-scan", "install.command", "update.command",
@@ -65,6 +70,7 @@ PRODUCT_PATHSPECS = (
     "config/provider-authenticators.json", "config/aws-custody-core.json",
     "config/aws-custody-production-policy.json.example",
     "config/reviewer-trust-anchors.json", "config/native-filesystem-helper.json",
+    "config/native-ephemeral-bootstrap.json",
     "native/*.c", "native/*.sh", "libexec/*.txt",
 )
 

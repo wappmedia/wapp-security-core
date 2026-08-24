@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.."&&pwd)"
+POLICY="$ROOT/config/native-ephemeral-bootstrap.json"
+LOADER="$ROOT/lib/native-displaced-inventory-ephemeral-loader.sh"
+LAUNCHER="$ROOT/libexec/wapp-native-ephemeral-memfd-launcher-linux-x86_64.b64.txt"
+HELPER="$ROOT/libexec/wapp-native-displaced-inventory-linux-x86_64.b64.txt"
+SOURCE="$ROOT/native/ephemeral-memfd-launcher.c"
+BUILD="$ROOT/native/build-ephemeral-memfd-launcher.sh"
+TMP="$(mktemp -d 2>/dev/null||mktemp -d -t wapp-native-ephemeral-test)"
+trap 'chmod -R u+rwX "$TMP" 2>/dev/null||true;rm -rf "$TMP"' EXIT
+fail(){ printf 'FAIL: %s\n' "$1" >&2;exit 1; }
+
+bash -n "$LOADER" "$BUILD"
+python3 - "$ROOT" "$POLICY" "$LAUNCHER" <<'PY'
+import base64,hashlib,json,pathlib,re,sys
+root=pathlib.Path(sys.argv[1]).resolve();policy=json.loads(pathlib.Path(sys.argv[2]).read_text());encoded=pathlib.Path(sys.argv[3]).read_bytes()
+keys={'artifact_encoding','authority','bootstrap_assurance','build_tool','customer_configuration_modified','database_modified','execution_contract','helper_policy_path','launcher_binary_bytes','launcher_binary_sha256','launcher_encoded_bytes','launcher_encoded_path','launcher_encoded_sha256','launcher_source_path','loader_template_path','platform','residual_risk','schema','staging_contract','target_host_ephemeral_bootstrap_modified','tool','wordpress_filesystem_modified'}
+assert set(policy)==keys and policy['tool']=='wapp-security-native-ephemeral-bootstrap-policy' and policy['schema']==1
+assert policy['platform']=='linux-x86_64' and policy['bootstrap_assurance']=='DEGRADED_ASSURANCE_EPHEMERAL_BOOTSTRAP'
+assert policy['staging_contract']=='OPERATION_BOUND_SIBLING_PRIVATE_DIRECTORY_V1' and policy['execution_contract']=='SEALED_MEMFD_EXECVEAT_PINNED_HELPER_V1'
+assert policy['residual_risk']=='SAME_PRINCIPAL_TOCTOU_RISK_ACCEPTED_BY_HUMAN_OPERATOR'
+assert policy['target_host_ephemeral_bootstrap_modified'] is True and policy['wordpress_filesystem_modified'] is False and policy['database_modified'] is False and policy['customer_configuration_modified'] is False
+assert policy['authority']=={'apply':False,'closure':False,'mutation':False,'prepare':False,'ready':False}
+assert policy['build_tool']=='zig-0.15.2' and policy['artifact_encoding']=='base64-rfc4648-no-wrap-v1'
+assert re.fullmatch(rb'[A-Za-z0-9+/]+={0,2}\n',encoded)
+binary=base64.b64decode(encoded.strip(),validate=True)
+assert len(encoded)==policy['launcher_encoded_bytes']==47437 and hashlib.sha256(encoded).hexdigest()==policy['launcher_encoded_sha256']=='8558113583050fb20ab84e45f5dbd53ee9f2f88e7909f971c3b326e3ae78f4f8'
+assert len(binary)==policy['launcher_binary_bytes']==35576 and hashlib.sha256(binary).hexdigest()==policy['launcher_binary_sha256']=='140323548884cdbb156d189f5e0b22299dd0ae82ba84d5b3e5f8d16e782eecae'
+for field in ('helper_policy_path','launcher_encoded_path','launcher_source_path','loader_template_path'):
+ path=(root/policy[field]).resolve();assert path.is_file() and not path.is_symlink() and str(path).startswith(str(root)+'/')
+PY
+grep -Fq '#define HELPER_BYTES 75384U' "$SOURCE"||fail helper_size_not_compiled
+grep -Fq '#define HELPER_SHA256 "d073caf84d2674ff8e8dcdec75b4e4862a53498448532687340d2f8718a5c70a"' "$SOURCE"||fail helper_sha_not_compiled
+grep -Fq 'SYS_memfd_create' "$SOURCE"&&grep -Fq 'F_ADD_SEALS' "$SOURCE"&&grep -Fq 'SYS_execveat' "$SOURCE"||fail descriptor_launch_contract_missing
+grep -Fq 'stage_parent="${target_root%/*}"' "$LOADER"||fail stage_not_outside_webroot
+grep -Fq 'set -C' "$LOADER"||fail exclusive_create_missing
+grep -Fq 'staged launcher drift after execution' "$LOADER"||fail postexecution_identity_missing
+grep -Fq 'cleanup identity drift; staged path retained fail-closed' "$LOADER"||fail cleanup_drift_guard_missing
+grep -Fq 'launcher cleanup absence failed' "$LOADER"&&grep -Fq 'operation directory cleanup absence failed' "$LOADER"||fail cleanup_absence_missing
+if grep -Eq '(^|[^A-Za-z_])(eval|wp|wp-cli|php)([^A-Za-z_]|$)' "$LOADER";then fail arbitrary_or_customer_runtime_surface;fi
+
+if [[ -n "${WAPP_ZIG_BIN:-}" ]];then
+  rebuilt="$TMP/rebuilt-launcher.b64.txt"
+  ZIG_GLOBAL_CACHE_DIR="$TMP/zig-global" ZIG_LOCAL_CACHE_DIR="$TMP/zig-local" WAPP_EPHEMERAL_LAUNCHER_OUTPUT="$rebuilt" /bin/bash "$BUILD" >/dev/null
+  cmp -s "$LAUNCHER" "$rebuilt"||fail source_artifact_reproducibility_drift
+fi
+
+bad="$TMP/bad.b64";python3 - "$LAUNCHER" "$bad" <<'PY'
+import base64,hashlib,pathlib,sys
+source,out=map(pathlib.Path,sys.argv[1:]);original=base64.b64decode(source.read_bytes().strip(),validate=True);changed=bytearray(original);changed[0]^=1;out.write_bytes(base64.b64encode(changed)+b'\n')
+assert len(changed)==len(original) and hashlib.sha256(changed).digest()!=hashlib.sha256(original).digest()
+PY
+
+if [[ "$(uname -s)" != Linux ]];then
+  printf 'PASS: native degraded ephemeral bootstrap policy, source, artifact and fail-closed macOS boundary\n'
+  exit 0
+fi
+
+build_probe(){
+  local launcher="$1" output="$2"
+  python3 - "$LOADER" "$launcher" "$HELPER" "$output" <<'PY'
+import os,sys
+template,launcher,helper,out=sys.argv[1:];raw=open(template,'rb').read();raw=raw.replace(b'__WAPP_EPHEMERAL_LAUNCHER_BASE64_PAYLOAD__',open(launcher,'rb').read().strip()).replace(b'__WAPP_NATIVE_HELPER_BASE64_PAYLOAD__',open(helper,'rb').read().strip());open(out,'wb').write(raw);os.chmod(out,0o700)
+PY
+}
+
+ROOT_PARENT="$TMP/private-home";SITE="$ROOT_PARENT/site-root"
+mkdir -m 700 -p "$SITE/wp-content/plugins/synthetic"
+printf 'synthetic\n' >"$SITE/wp-content/plugins/synthetic/plugin.php"
+nonce="$(printf positive|sha256sum|awk '{print $1}')";probe="$TMP/probe.sh";build_probe "$LAUNCHER" "$probe"
+before="$(find "$SITE" -print0|sort -z|xargs -0 stat -c '%n:%F:%s:%a:%u:%g:%d:%i'|sha256sum|awk '{print $1}')";out="$TMP/out.tsv"
+/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc "$probe" "$SITE" "$nonce" d073caf84d2674ff8e8dcdec75b4e4862a53498448532687340d2f8718a5c70a 75384 inventory '' >"$out"
+grep -Fq $'CAPTURE_NONCE\t'"$nonce" "$out"&&grep -Fq 'EPHEMERAL_BOOTSTRAP_AUDIT_V1' "$out"&&grep -Fq 'CLEANUP_VERIFIED' "$out"||fail correct_staged_launcher
+after="$(find "$SITE" -print0|sort -z|xargs -0 stat -c '%n:%F:%s:%a:%u:%g:%d:%i'|sha256sum|awk '{print $1}')";[[ "$before" == "$after" ]]||fail webroot_modified
+[[ ! -e "$ROOT_PARENT/.wapp-security-ephemeral-bootstrap-$nonce" ]]||fail cleanup_not_absent
+
+bad_nonce="$(printf bad|sha256sum|awk '{print $1}')";build_probe "$bad" "$TMP/bad-probe.sh"
+if /bin/bash "$TMP/bad-probe.sh" "$SITE" "$bad_nonce" d073caf84d2674ff8e8dcdec75b4e4862a53498448532687340d2f8718a5c70a 75384 inventory '' >/dev/null 2>&1;then fail hash_mismatch_accepted;fi
+
+collision_nonce="$(printf collision|sha256sum|awk '{print $1}')";mkdir -m 700 "$ROOT_PARENT/.wapp-security-ephemeral-bootstrap-$collision_nonce"
+if /bin/bash "$probe" "$SITE" "$collision_nonce" d073caf84d2674ff8e8dcdec75b4e4862a53498448532687340d2f8718a5c70a 75384 inventory '' >/dev/null 2>&1;then fail preexisting_directory_accepted;fi
+rm -rf "$ROOT_PARENT/.wapp-security-ephemeral-bootstrap-$collision_nonce";ln -s "$SITE" "$ROOT_PARENT/.wapp-security-ephemeral-bootstrap-$collision_nonce"
+if /bin/bash "$probe" "$SITE" "$collision_nonce" d073caf84d2674ff8e8dcdec75b4e4862a53498448532687340d2f8718a5c70a 75384 inventory '' >/dev/null 2>&1;then fail symlink_accepted;fi
+rm "$ROOT_PARENT/.wapp-security-ephemeral-bootstrap-$collision_nonce"
+
+printf 'PASS: native staged launcher, hash/collision/symlink rejection, exact cleanup and no-webroot-write\n'

@@ -14,3 +14,8 @@ native/build-displaced-inventory-helper.sh
 lib/native-displaced-inventory-loader.sh
 libexec/wapp-native-displaced-inventory-linux-x86_64.b64.txt
 config/native-filesystem-helper.json
+native/ephemeral-memfd-launcher.c
+native/build-ephemeral-memfd-launcher.sh
+lib/native-displaced-inventory-ephemeral-loader.sh
+libexec/wapp-native-ephemeral-memfd-launcher-linux-x86_64.b64.txt
+config/native-ephemeral-bootstrap.json
