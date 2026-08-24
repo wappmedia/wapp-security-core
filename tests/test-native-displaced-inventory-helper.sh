@@ -38,12 +38,34 @@ import os,pathlib,sys
 loader,artifact,output=map(pathlib.Path,sys.argv[1:])
 raw=loader.read_bytes();marker=b'__WAPP_NATIVE_HELPER_BASE64_PAYLOAD__'
 assert raw.count(marker)==1
+assert b'"$PERL" -T -e' in raw
 assert b'syscall(319,"wapp-native-displaced-inventory",2)' not in raw
 assert b'syscall(322,$fd,"",$ptr,$env,0x1000)' not in raw
 assert b'my $memfd_name="wapp-native-displaced-inventory";my $fd=syscall(319,$memfd_name,2)' in raw
 assert b'my $empty_path="";syscall(322,$fd,$empty_path,$ptr,$env,0x1000)' in raw
 output.write_bytes(raw.replace(marker,artifact.read_bytes().strip()));output.chmod(0o700)
 PY
+
+/usr/bin/python3 - "$LOADER" "$TMP/taint-contract.pl" <<'PY'
+import pathlib,sys
+loader,output=map(pathlib.Path,sys.argv[1:])
+raw=loader.read_text(encoding='utf-8')
+body=raw.split('"$PERL" -T -e \'\n',1)[1].split('\n\' "$native_sha"',1)[0]
+marker='my $memfd_name="wapp-native-displaced-inventory";'
+assert body.count(marker)==1
+body=body.split(marker,1)[0]+r'''use Scalar::Util qw(tainted);
+my $memfd_name="wapp-native-displaced-inventory";my $empty_path="";
+my @args=("wapp-native-displaced-inventory",$mode,$root,$nonce,$expected,$identity,"7");push @args,$selected if $mode eq "rollback";my @hold=map "$_\0",@args;my $ptr="";$ptr.=pack("p",$_) for @hold;$ptr.=pack("J",0);my $env=pack("J",0);
+die "tainted validated syscall input\n" if grep {tainted($_)} ($memfd_name,$empty_path,$ptr,$env,@hold);
+print "TAINT_CONTRACT_PASS\n";
+'''
+output.write_text(body,encoding='utf-8');output.chmod(0o700)
+PY
+TAINT_NONCE="$(printf native-helper-taint-contract|/usr/bin/openssl dgst -sha256|/usr/bin/awk '{print $NF}')"
+RUNTIME_IDENTITY="loader=/usr/bin/perl|loader_sha=$(sha /usr/bin/perl)|loader_meta=0:0:755:1:2:3|helper_sha=$BINARY_SHA|transport=sealed_memfd_execveat_v1"
+/usr/bin/perl -T "$TMP/taint-contract.pl" "$BINARY_SHA" "$BINARY_BYTES" /tmp/provider-neutral-root "$TAINT_NONCE" "$RUNTIME_IDENTITY" inventory '' <"$ARTIFACT" |grep -Fxq TAINT_CONTRACT_PASS
+expect_fail taint_arbitrary_identity /usr/bin/perl -T "$TMP/taint-contract.pl" "$BINARY_SHA" "$BINARY_BYTES" /tmp/provider-neutral-root "$TAINT_NONCE" arbitrary-tainted-value inventory ''
+expect_fail taint_arbitrary_root /usr/bin/perl -T "$TMP/taint-contract.pl" "$BINARY_SHA" "$BINARY_BYTES" /tmp/../arbitrary "$TAINT_NONCE" "$RUNTIME_IDENTITY" inventory ''
 
 # Perl's syscall() forces string arguments to writable scalars. A literal is
 # read-only on the canonical Ubuntu Perl and fails before memfd_create. Keep a
