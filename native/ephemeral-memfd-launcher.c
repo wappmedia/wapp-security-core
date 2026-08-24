@@ -46,8 +46,8 @@ static int valid_hex(const char *s,size_t n){if(strlen(s)!=n)return 0;for(size_t
 static void write_all(int fd,const unsigned char *p,size_t n){size_t off=0;while(off<n){ssize_t got=write(fd,p+off,n-off);if(got<0&&errno==EINTR)continue;if(got<=0)die("memfd write failed");off+=(size_t)got;}}
 
 int main(int argc,char **argv){
-  if((argc!=5&&argc!=6)||(!strcmp(argv[1],"inventory")&&argc!=5)||(!strcmp(argv[1],"rollback")&&argc!=6))die("invalid bounded invocation");
-  if(strcmp(argv[1],"inventory")&&strcmp(argv[1],"rollback"))die("invalid bounded mode");
+  if((argc!=5&&argc!=6)||((!strcmp(argv[1],"inventory")||!strcmp(argv[1],"diagnostic"))&&argc!=5)||(!strcmp(argv[1],"rollback")&&argc!=6))die("invalid bounded invocation");
+  if(strcmp(argv[1],"inventory")&&strcmp(argv[1],"diagnostic")&&strcmp(argv[1],"rollback"))die("invalid bounded mode");
   if(!valid_root(argv[2])||!valid_hex(argv[3],64)||!safe_text(argv[4],512))die("invalid bounded identity");
   if(strstr(argv[4],"loader=DEGRADED_ASSURANCE_EPHEMERAL_BOOTSTRAP_V1|")!=argv[4]||!strstr(argv[4],"|helper_sha=" HELPER_SHA256 "|transport=sealed_memfd_execveat_v1"))die("runtime identity contract");
   if(argc==6&&(!valid_hex(argv[5],strlen(argv[5]))||strlen(argv[5])<2||strlen(argv[5])>8192||strlen(argv[5])%2))die("invalid selected target");

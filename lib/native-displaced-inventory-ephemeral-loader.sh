@@ -13,8 +13,8 @@ MKDIR=/bin/mkdir
 CHMOD=/bin/chmod
 RM=/bin/rm
 RMDIR=/bin/rmdir
-LAUNCHER_SHA=ae64295bd05299f8b35605d6ae3bee6d9a8a06c8da5caa373fc97a8889cba66a
-LAUNCHER_BYTES=35576
+LAUNCHER_SHA=b2f0e530655525785931d89abef1f2ab902ed75939f3a0bcd9f480b81c89c030
+LAUNCHER_BYTES=35624
 
 meta(){ "$STAT" -c '%u:%g:%a:%d:%i:%s' "$1" 2>/dev/null; }
 trusted_metadata(){
