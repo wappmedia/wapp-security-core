@@ -94,6 +94,24 @@ expect_fail invalid_time "$TOOL" create --raw "$TMP/raw.tsv" --root "$root_path"
 sed '/^DRIFT_ISSUE/d;s/\t0\t1\tREAD_ONLY/\t0\t0\tREAD_ONLY/' "$TMP/issue-only.tsv" >"$TMP/summary-only.tsv"
 expect_fail summary_only "$TOOL" create --raw "$TMP/summary-only.tsv" --root "$root_path" --operation-id "$operation" --observed-at 2026-08-24T12:00:00Z --product-seal "$TMP/product-seal.json" --output "$TMP/summary-only.json"
 
+# The helper orders unresolved source records by reason, path and detail, then
+# emits public issue records path-first. Valid reason order can oppose path order.
+late_path_hex="$(printf %s 'wp-content/cache/z-late.log'|/usr/bin/xxd -p -c 9999)"
+early_path_hex="$(printf %s 'wp-content/cache/a-early.log'|/usr/bin/xxd -p -c 9999)"
+{
+  printf 'CAPTURE_NONCE\t%s\n' "$operation"
+  printf 'DRIFT_DIAGNOSTIC\tSIGNED_DRIFT_DIAGNOSTIC_MODE_V1\t%s\t11\t22\t11\t22\t%s\t%s\t%s\t%s\t%s\t0\t2\tREAD_ONLY\tNON_AUTHORIZING\n' "$root_hex" "$pass1" "$pass2" "$helper_sha" "$runtime" "$runtime_hex"
+  printf 'DRIFT_ISSUE\t%s\tA_REASON\t%s\ttrue\tfalse\n' "$late_path_hex" "$file_sha"
+  printf 'DRIFT_ISSUE\t%s\tZ_REASON\t%s\ttrue\tfalse\n' "$early_path_hex" "$file_sha"
+} >"$TMP/helper-issue-order.tsv"
+"$TOOL" create --raw "$TMP/helper-issue-order.tsv" --root "$root_path" --operation-id "$operation" --observed-at 2026-08-24T12:00:00Z --product-seal "$TMP/product-seal.json" --output "$TMP/helper-issue-order.json" >/dev/null
+"$TOOL" verify --artifact "$TMP/helper-issue-order.json" >/dev/null||fail helper_issue_order
+{
+  head -n 3 "$TMP/helper-issue-order.tsv"
+  sed -n '3p' "$TMP/helper-issue-order.tsv"
+} >"$TMP/duplicate-issue.tsv"
+expect_fail duplicate_issue "$TOOL" create --raw "$TMP/duplicate-issue.tsv" --root "$root_path" --operation-id "$operation" --observed-at 2026-08-24T12:00:00Z --product-seal "$TMP/product-seal.json" --output "$TMP/duplicate-issue.json"
+
 # A declared over-cap diagnostic fails before any artifact can be signed.
 sed 's/\t1\t0\tREAD_ONLY/\t200001\t0\tREAD_ONLY/' "$TMP/raw.tsv" >"$TMP/over-cap.tsv"
 expect_fail over_cap "$TOOL" create --raw "$TMP/over-cap.tsv" --root "$root_path" --operation-id "$operation" --observed-at 2026-08-24T12:00:00Z --product-seal "$TMP/product-seal.json" --output "$TMP/over-cap.json"

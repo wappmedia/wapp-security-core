@@ -386,12 +386,14 @@ def parse_delta(line: str, previous: bytes | None) -> tuple[dict[str, object], b
     }, path)
 
 
-def parse_issue(line: str, previous: tuple[str, str, str, bool, bool] | None) -> tuple[dict[str, object], tuple[str, str, str, bool, bool]]:
+def parse_issue(line: str, previous: tuple[str, str, str] | None) -> tuple[dict[str, object], tuple[str, str, str]]:
     fields = line.split("\t")
     if len(fields) != 6 or fields[0] != "DRIFT_ISSUE" or not re.fullmatch(r"[A-Z0-9_]{1,64}", fields[2]) or not HEX64.fullmatch(fields[3]) or fields[4] not in ("true", "false") or fields[5] not in ("true", "false") or fields[4] == fields[5]:
         fail("diagnostic issue delta invalid")
     decode_hex(fields[1], absolute=False)
-    current = (fields[1], fields[2], fields[3], fields[4] == "true", fields[5] == "true")
+    # The helper merges its sorted UNRESOLVED source stream by reason, path,
+    # and detail before serializing the public DRIFT_ISSUE record path-first.
+    current = (fields[2], fields[1], fields[3])
     if previous is not None and current <= previous:
         fail("diagnostic issue order invalid")
     return ({"normalized_path_hex": fields[1], "reason": fields[2], "detail_sha256": fields[3], "pass1_exists": fields[4] == "true", "pass2_exists": fields[5] == "true"}, current)
