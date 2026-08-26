@@ -9,7 +9,7 @@ assert p['residual_risk']=='SAME_PRINCIPAL_TOCTOU_RISK_REQUIRES_EXPLICIT_LIVE_GO
 assert len(raw)==p['launcher_binary_bytes'] and hashlib.sha256(raw).hexdigest()==p['launcher_binary_sha256']
 assert pathlib.Path(sys.argv[2]).stat().st_size==p['launcher_encoded_bytes'] and hashlib.sha256(pathlib.Path(sys.argv[2]).read_bytes()).hexdigest()==p['launcher_encoded_sha256']
 s=pathlib.Path(sys.argv[3]).read_text();l=pathlib.Path(sys.argv[4]).read_text()
-for needle in ['apply','observe-quarantined','rollback','observe-original','F_ADD_SEALS','SYS_execveat','HELPER_SHA256']:
+for needle in ['apply','observe-quarantined','rollback','observe-original','F_ADD_SEALS','SYS_execveat','HELPER_SHA256','struct rlimit f={256,256},m={512U*1024U*1024U,512U*1024U*1024U}']:
  assert needle in s
 for needle in ['__WAPP_EXACT_FILE_LAUNCHER_BASE64_PAYLOAD__','__WAPP_EXACT_FILE_HELPER_BASE64_PAYLOAD__','SAME_PRINCIPAL_TOCTOU_RISK_REQUIRES_LIVE_GO','CLEANUP_VERIFIED']:
  assert needle in l

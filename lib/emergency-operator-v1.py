@@ -835,6 +835,7 @@ def verify_reopen_source_lineage(
         "QUARANTINE_IDENTITY_ACCESS": "BOUNDED_IDENTITY_QUARANTINE",
     }
     observed_orders: list[int] = []; observed_consumers: list[str] = []; plan_dependencies: list[str] = []
+    exact_file_dispatch_orders: list[list[int]] = []
     for index, dispatch in enumerate(dispatches):
         if not isinstance(dispatch, dict): fail("reopen coherent plan dispatch malformed")
         exact_keys(dispatch, {"order", "stage", "consumer", "action_count", "action_orders", "binding"}, f"continuation.coherent_plan.dispatch[{index}]")
@@ -855,7 +856,12 @@ def verify_reopen_source_lineage(
         binding_path = bound_file(dispatch["binding"], f"continuation.coherent_plan.dispatch[{index}].binding")
         if consumer == "BOUNDED_QUARANTINE_EXACT_FILE":
             verify_exact_file_binding(binding_path, remediation_value, remediation_path, orders)
+            exact_file_dispatch_orders.append(orders)
         plan_dependencies.append(str(binding_path))
+    expected_exact_file_orders = [action["order"] for action in actions if action["primitive"] == "QUARANTINE_EXACT_FILE"]
+    if ((expected_exact_file_orders and exact_file_dispatch_orders != [expected_exact_file_orders])
+        or (not expected_exact_file_orders and exact_file_dispatch_orders)):
+        fail("reopen exact-file actions must occupy one complete native transaction dispatch")
     if (observed_orders != list(range(1, len(actions) + 1)) or plan["apply_order"] != observed_consumers
         or plan["rollback_order"] != list(reversed(observed_consumers))):
         fail("reopen coherent plan complete ordering mismatch")

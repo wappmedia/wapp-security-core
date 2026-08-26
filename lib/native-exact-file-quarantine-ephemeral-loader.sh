@@ -8,10 +8,10 @@ set -eEuo pipefail
 umask 077
 fail(){ printf 'native-exact-file-loader: %s\n' "$1" >&2;exit 20; }
 STAT=/usr/bin/stat;OPENSSL=/usr/bin/openssl;MKDIR=/bin/mkdir;CHMOD=/bin/chmod;RM=/bin/rm;RMDIR=/bin/rmdir
-LAUNCHER_SHA=afcf6829bd269d197d3832f7dc03952c95eca57d73f26d7e5383dc242c109e64
+LAUNCHER_SHA=0ec26249e6d53ecbc40212af886430feecdaa505238121ca18130ed0da772f32
 LAUNCHER_BYTES=35288
-HELPER_SHA=139b4850a72e5e76472d87c8482d4ced02459e002c1842849560351eb725721b
-HELPER_BYTES=53968
+HELPER_SHA=e357ec78d94065b9ee3be98702a062c6b82a766fe9685055bed14c68ee933a78
+HELPER_BYTES=54976
 meta(){ "$STAT" -c '%u:%g:%a:%d:%i:%s' "$1" 2>/dev/null; }
 trusted_metadata(){ local v="$1" u g m;IFS=: read -r u g m _ <<<"$v";[[ "$u" == 0&&"$g" == 0&&"$m" =~ ^[0-7]{3,4}$ ]]&&(( (8#$m&022)==0 )); }
 trusted_directory(){ [[ -d "$1"&&! -L "$1" ]]&&trusted_metadata "$(meta "$1")"; }

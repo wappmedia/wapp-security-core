@@ -98,5 +98,25 @@ prepare_case parent_substitution;apply_case 9123456789abcdef0123456789abcdef;mv 
 prepare_case rollback_collision;apply_case a123456789abcdef0123456789abcdef;printf collision >"$CASE/home/site/a/one.php";expect_fail rollback_collision "$TMP/helper" rollback "$CASE/home/site" a123456789abcdef0123456789abcdef "$RD" "$RI" "$MS" "$MH" "$PS" "$PH" "$QD" "$QI" "$runtime" QUARANTINE_EXACT_FILE_V1;grep -Fq 'PARTIAL_OR_DIVERGED' "$TMP/rollback_collision.out"||fail rollback_collision_state
 
 prepare_case reconcile;apply_case b123456789abcdef0123456789abcdef;chmod 640 "$Q/files/a/one.php";mv "$Q/files/a/one.php" "$CASE/home/site/a/one.php";"$TMP/helper" reconcile-rollback "$CASE/home/site" b123456789abcdef0123456789abcdef "$RD" "$RI" "$MS" "$MH" "$PS" "$PH" "$QD" "$QI" "$runtime" QUARANTINE_EXACT_FILE_V1 |grep -Fq $'ORIGINAL_EXACT_RECONCILED\t2';[[ "$(cat "$CASE/home/site/a/one.php")" == alpha&&"$(cat "$CASE/home/site/b/two.php")" == beta ]]||fail reconcile_bytes
+prepare_case duplicate_crash;apply_case b223456789abcdef0123456789abcdef;ln "$Q/files/a/one.php" "$CASE/home/site/a/one.php";"$TMP/helper" reconcile-rollback "$CASE/home/site" b223456789abcdef0123456789abcdef "$RD" "$RI" "$MS" "$MH" "$PS" "$PH" "$QD" "$QI" "$runtime" QUARANTINE_EXACT_FILE_V1 |grep -Fq $'ORIGINAL_EXACT_RECONCILED\t2';[[ "$(stat -c %h "$CASE/home/site/a/one.php")" == 1&&"$(stat -c %a "$CASE/home/site/a/one.php")" == 640 ]]||fail duplicate_crash_recovery
+
+# Exercise the shipped loader -> staged launcher -> sealed memfd -> helper path.
+LOADER_TEMPLATE="$ROOT/lib/native-exact-file-quarantine-ephemeral-loader.sh";LAUNCHER_ARTIFACT="$ROOT/libexec/wapp-native-exact-file-quarantine-ephemeral-memfd-launcher-linux-x86_64.b64.txt"
+python3 - "$LOADER_TEMPLATE" "$LAUNCHER_ARTIFACT" "$ARTIFACT" "$TMP/loader" <<'PY'
+import pathlib,sys
+template,launcher,helper,out=map(pathlib.Path,sys.argv[1:]);value=template.read_text();value=value.replace('__WAPP_EXACT_FILE_LAUNCHER_BASE64_PAYLOAD__',launcher.read_text().strip()).replace('__WAPP_EXACT_FILE_HELPER_BASE64_PAYLOAD__',helper.read_text().strip());out.write_text(value)
+PY
+chmod 700 "$TMP/loader";prepare_case shipped;shipop=c123456789abcdef0123456789abcdef
+ship_out="$("$TMP/loader" "$CASE/home/site" "$shipop" "$RD" "$RI" "$MS" "$MH" "$PS" "$PH" 0 0 apply)";grep -Fq 'EXACT_FILE_EPHEMERAL_RUNTIME_AUDIT_V1' <<<"$ship_out"||fail shipped_loader_audit;QD="$(awk -F '\t' '$2=="QUARANTINED_EXACT"{print $5}' <<<"$ship_out")";QI="$(awk -F '\t' '$2=="QUARANTINED_EXACT"{print $6}' <<<"$ship_out")";[[ "$QD" =~ ^[0-9]+$&&"$QI" =~ ^[0-9]+$ ]]||fail shipped_receipt_identity
+"$TMP/loader" "$CASE/home/site" "$shipop" "$RD" "$RI" "$MS" "$MH" "$PS" "$PH" "$QD" "$QI" observe-quarantined |grep -Fq $'QUARANTINED_EXACT\t2'
+"$TMP/loader" "$CASE/home/site" "$shipop" "$RD" "$RI" "$MS" "$MH" "$PS" "$PH" "$QD" "$QI" rollback |grep -Fq $'ORIGINAL_EXACT\t2';[[ ! -e "$CASE/home/.wapp-security-exact-file-launcher-$shipop" ]]||fail shipped_stage_cleanup
+
+# A test-only build crashes exactly after the durable destination fsync.  The
+# released helper must reconcile both apply-side and rollback-side mixed state.
+[[ "${WAPP_ZIG_BIN:-}" == /*&&-x "$WAPP_ZIG_BIN"&&"$($WAPP_ZIG_BIN version)" == 0.15.2 ]]||fail test_zig_unavailable
+ZIG_GLOBAL_CACHE_DIR="$TMP/zig-global" ZIG_LOCAL_CACHE_DIR="$TMP/zig-local" "$WAPP_ZIG_BIN" cc -target x86_64-linux-musl -O2 -s -std=gnu11 -Wall -Wextra -Werror -DWAPP_TEST_FAULT_INJECTION "$SOURCE" -o "$TMP/fault-helper"
+expect_crash(){ local label="$1";shift;set +e;"$@" >"$TMP/$label.out" 2>"$TMP/$label.err";local rc=$?;set -e;[[ "$rc" == 99 ]]||fail "$label"; }
+prepare_case apply_crash;crashop=d123456789abcdef0123456789abcdef;expect_crash apply_destination_durable env WAPP_TEST_CRASH_POINT=apply_after_destination_fsync "$TMP/fault-helper" apply "$CASE/home/site" "$crashop" "$RD" "$RI" "$MS" "$MH" "$PS" "$PH" 0 0 "$runtime" QUARANTINE_EXACT_FILE_V1;Q="$CASE/home/.wapp-security-exact-file-$crashop";QD="$(stat -c %d "$Q")";QI="$(stat -c %i "$Q")";"$TMP/helper" reconcile-rollback "$CASE/home/site" "$crashop" "$RD" "$RI" "$MS" "$MH" "$PS" "$PH" "$QD" "$QI" "$runtime" QUARANTINE_EXACT_FILE_V1 |grep -Fq $'ORIGINAL_EXACT_RECONCILED\t2'
+prepare_case rollback_crash;crashop=e123456789abcdef0123456789abcdef;apply_case "$crashop";expect_crash restore_destination_durable env WAPP_TEST_CRASH_POINT=restore_after_destination_fsync "$TMP/fault-helper" rollback "$CASE/home/site" "$crashop" "$RD" "$RI" "$MS" "$MH" "$PS" "$PH" "$QD" "$QI" "$runtime" QUARANTINE_EXACT_FILE_V1;"$TMP/helper" reconcile-rollback "$CASE/home/site" "$crashop" "$RD" "$RI" "$MS" "$MH" "$PS" "$PH" "$QD" "$QI" "$runtime" QUARANTINE_EXACT_FILE_V1 |grep -Fq $'ORIGINAL_EXACT_RECONCILED\t2'
 
 printf 'PASS: native exact-file bounded multi-target transaction and adversarial lifecycle matrix\n'
