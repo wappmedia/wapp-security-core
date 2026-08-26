@@ -330,6 +330,77 @@ package['continuation']['reopen_reservation']=ref(reservation_path);open(out,'w'
 PY
 sign "$nested_reservation";sign "$nested_reopen"
 expect_fail reopen_schema2_predecessor_chain python3 "$MODEL" verify-package --package "$nested_reopen" --domain "$domain" --now-epoch "$now"
+rm "$nested_reservation" "$nested_reservation.hmac" "$nested_reopen" "$nested_reopen.hmac"
+unconsumed_registry="$run/unconsumed-successor-registry.json"
+unconsumed_disposition="$run/unconsumed-successor-disposition.json"
+unconsumed_disposition_review="$run/unconsumed-successor-disposition-review.json"
+schema3_reservation="$run/consumed/reopen-successors/$(recovery_sha256_file "$current_reservation").json"
+schema3_reopen="$run/reopen-schema3-unconsumed-successor.json"
+schema3_observation="$run/schema3-current-isolated-observation.json"
+python3 - "$reopen" "$reopen_review" "$current_reservation" "$unconsumed_registry" "$unconsumed_disposition" "$schema3_reservation" "$schema3_reopen" "$schema3_observation" "$now" <<'PY'
+import hashlib,json,os,sys
+source,review,current,registry_path,disposition_path,reservation_path,out,observation_out,now=sys.argv[1:];now=int(now);successor_now=now+3601
+def ref(path):return {'path':path,'sha256':hashlib.sha256(open(path,'rb').read()).hexdigest()}
+def write(path,value):open(path,'w').write(json.dumps(value,sort_keys=True,separators=(',',':'))+'\n')
+package=json.load(open(source));source_sha=ref(source)['sha256'];current_ref=ref(current)
+registry={'tool':'wapp-security-emergency-operator-registry','schema':1,'domain':package['domain'],'remediation':json.load(open(package['continuation']['remediation_registry']['path']))['remediation'],'reopen':{'package':ref(source),'review':ref(review)},'closure':None};write(registry_path,registry)
+remediation=json.load(open(package['continuation']['remediation_package']['path']))
+disposition={'tool':'wapp-security-emergency-reopen-unconsumed-predecessor-disposition','schema':1,'state':'REGISTERED_UNCONSUMED_PRECONSUMPTION_ABORT_VERIFIED_UNMUTATED','domain':package['domain'],'root':package['site']['root'],'source_operation_id':remediation['operation_id'],'source_package_sha256':package['continuation']['remediation_package']['sha256'],'predecessor_reopen_operation_id':package['operation_id'],'predecessor_reopen_package_sha256':source_sha,'predecessor_reservation_sha256':current_ref['sha256'],'predecessor_registry_sha256':'0'*64,'predecessor_expires_at_epoch':package['expires_at_epoch'],'predecessor_expired_before_successor':True,'consumption_marker_absent':True,'runtime_directory_absent':True,'remote_access_started':False,'reverse_rename_started':False,'customer_mutation_state':'NONE','replay_allowed':False,'supersession_authority':'NEW_REOPEN_PACKAGE_ONLY','generated_at_epoch':successor_now,'authority':False}
+write(registry_path,registry);disposition['predecessor_registry_sha256']=ref(registry_path)['sha256'];write(disposition_path,disposition)
+observation_path=package['continuation']['current_isolation']['path'];observation=json.load(open(observation_path));observation['captured_at_epoch']=successor_now;write(observation_out,observation)
+successor=json.loads(json.dumps(package));successor['operation_id']='e'*32;successor['generated_at_epoch']=successor_now;successor['expires_at_epoch']=successor_now+3600;successor['one_shot']['consumption_marker']=os.path.join(os.path.dirname(out),'schema3-consumed');successor['continuation']['current_isolation']=ref(observation_out)
+committed=json.loads(json.dumps(successor));del committed['continuation']['reopen_reservation'];authority=hashlib.sha256(json.dumps(committed,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()
+predecessor={'reservation':current_ref,'package':ref(source),'review':ref(review),'registry':ref(registry_path),'disposition':ref(disposition_path),'disposition_review':{'path':sys.argv[0] if False else '', 'sha256':'0'*64}}
+reservation={'tool':'wapp-security-emergency-reopen-reservation','schema':3,'state':'RESERVED_FOR_DISTINCT_REOPEN','domain':successor['domain'],'root':successor['site']['root'],'source_operation_id':remediation['operation_id'],'source_package_sha256':successor['continuation']['remediation_package']['sha256'],'reopen_operation_id':successor['operation_id'],'created_at_epoch':successor_now,'expires_at_epoch':successor_now+3600,'reopen_authority_sha256':authority,'source_replay_allowed':False,'authority':False,'unconsumed_predecessor':predecessor}
+write(reservation_path,reservation);successor['continuation']['reopen_reservation']=ref(reservation_path);write(out,successor)
+PY
+sign "$unconsumed_registry";sign "$unconsumed_disposition";sign "$schema3_observation";make_review "$unconsumed_disposition" "$unconsumed_disposition_review"
+python3 - "$schema3_reservation" "$unconsumed_disposition_review" "$schema3_reopen" <<'PY'
+import hashlib,json,sys
+reservation_path,review_path,package_path=sys.argv[1:]
+def ref(path):return {'path':path,'sha256':hashlib.sha256(open(path,'rb').read()).hexdigest()}
+reservation=json.load(open(reservation_path));reservation['unconsumed_predecessor']['disposition_review']=ref(review_path);open(reservation_path,'w').write(json.dumps(reservation,sort_keys=True,separators=(',',':'))+'\n')
+package=json.load(open(package_path));package['continuation']['reopen_reservation']=ref(reservation_path);open(package_path,'w').write(json.dumps(package,sort_keys=True,separators=(',',':'))+'\n')
+PY
+sign "$schema3_reservation";sign "$schema3_reopen"
+schema3_now="$((now+3601))"
+overlap_backup="$run/schema3-overlap-backup";mkdir "$overlap_backup"
+for artifact in "$unconsumed_disposition" "$unconsumed_disposition.hmac" "$unconsumed_disposition_review" "$unconsumed_disposition_review.hmac" "$schema3_reservation" "$schema3_reservation.hmac" "$schema3_reopen" "$schema3_reopen.hmac";do /bin/cp "$artifact" "$overlap_backup/$(basename "$artifact")";done
+python3 - "$reopen" "$unconsumed_disposition" "$schema3_reservation" "$schema3_reopen" "$now" <<'PY'
+import hashlib,json,sys
+predecessor_path,disposition_path,reservation_path,package_path,now=sys.argv[1:];now=int(now)
+def ref(path):return {'path':path,'sha256':hashlib.sha256(open(path,'rb').read()).hexdigest()}
+def write(path,value):open(path,'w').write(json.dumps(value,sort_keys=True,separators=(',',':'))+'\n')
+predecessor=json.load(open(predecessor_path))
+disposition=json.load(open(disposition_path));disposition['generated_at_epoch']=now;write(disposition_path,disposition)
+package=json.load(open(package_path));package['generated_at_epoch']=now;package['expires_at_epoch']=now+1800;package['continuation']['current_isolation']=predecessor['continuation']['current_isolation']
+committed=json.loads(json.dumps(package));del committed['continuation']['reopen_reservation'];authority=hashlib.sha256(json.dumps(committed,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()
+reservation=json.load(open(reservation_path));reservation['created_at_epoch']=now;reservation['expires_at_epoch']=now+1800;reservation['reopen_authority_sha256']=authority;write(reservation_path,reservation)
+package['continuation']['reopen_reservation']=ref(reservation_path);write(package_path,package)
+PY
+sign "$unconsumed_disposition";make_review "$unconsumed_disposition" "$unconsumed_disposition_review"
+python3 - "$schema3_reservation" "$unconsumed_disposition_review" "$schema3_reopen" <<'PY'
+import hashlib,json,sys
+reservation_path,review_path,package_path=sys.argv[1:]
+def ref(path):return {'path':path,'sha256':hashlib.sha256(open(path,'rb').read()).hexdigest()}
+reservation=json.load(open(reservation_path));reservation['unconsumed_predecessor']['disposition_review']=ref(review_path);open(reservation_path,'w').write(json.dumps(reservation,sort_keys=True,separators=(',',':'))+'\n')
+package=json.load(open(package_path));package['continuation']['reopen_reservation']=ref(reservation_path);open(package_path,'w').write(json.dumps(package,sort_keys=True,separators=(',',':'))+'\n')
+PY
+sign "$schema3_reservation";sign "$schema3_reopen"
+expect_exact_fail reopen_schema3_overlapping_predecessor 'emergency-operator-v1: reopen unconsumed predecessor package lineage mismatch' python3 "$MODEL" verify-package --package "$schema3_reopen" --domain "$domain" --now-epoch "$now"
+for artifact in "$unconsumed_disposition" "$unconsumed_disposition.hmac" "$unconsumed_disposition_review" "$unconsumed_disposition_review.hmac" "$schema3_reservation" "$schema3_reservation.hmac" "$schema3_reopen" "$schema3_reopen.hmac";do /bin/cp "$overlap_backup/$(basename "$artifact")" "$artifact";done
+python3 "$MODEL" verify-package --package "$schema3_reopen" --domain "$domain" --now-epoch "$schema3_now" >/dev/null||fail reopen_schema3_unconsumed_successor
+pass reopen_schema3_unconsumed_successor
+expect_fail reopen_schema2_predecessor_after_expiry python3 "$MODEL" verify-package --package "$reopen" --domain "$domain" --now-epoch "$schema3_now"
+mkdir "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["one_shot"]["consumption_marker"])' "$reopen")"
+expect_fail reopen_schema3_consumed_predecessor python3 "$MODEL" verify-package --package "$schema3_reopen" --domain "$domain" --now-epoch "$schema3_now"
+rmdir "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["one_shot"]["consumption_marker"])' "$reopen")"
+python3 - "$unconsumed_disposition" <<'PY'
+import json,sys
+p=sys.argv[1];v=json.load(open(p));v['remote_access_started']=True;open(p,'w').write(json.dumps(v,sort_keys=True,separators=(',',':'))+'\n')
+PY
+sign "$unconsumed_disposition"
+expect_fail reopen_schema3_remote_started python3 "$MODEL" verify-package --package "$schema3_reopen" --domain "$domain" --now-epoch "$schema3_now"
 legacy_reservation="$run/consumed/reopen-reservation.json";legacy_reopen="$run/reopen-legacy-reservation.json"
 cp "$run/predecessor-reopen-package.json" "$legacy_reopen";sign "$legacy_reopen"
 mv "$run/predecessor-reopen-consumed" "$run/predecessor-reopen-consumed.hidden"

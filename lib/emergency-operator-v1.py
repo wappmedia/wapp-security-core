@@ -968,6 +968,130 @@ def verify_reopen_source_lineage(
                     "reopen predecessor package.generated_at_epoch", minimum=1)) > reopen_generated
             or disposition["authority"] is not False):
             fail("reopen predecessor disposition mismatch")
+    elif reservation_schema == 3:
+        exact_keys(reservation, {"tool", "schema", "state", "domain", "root", "source_operation_id",
+            "source_package_sha256", "reopen_operation_id", "created_at_epoch", "expires_at_epoch",
+            "reopen_authority_sha256", "source_replay_allowed", "authority", "unconsumed_predecessor"},
+            "reopen reservation")
+        predecessor = reservation["unconsumed_predecessor"]
+        if not isinstance(predecessor, dict):
+            fail("reopen unconsumed predecessor must be an object")
+        exact_keys(predecessor, {"reservation", "package", "review", "registry", "disposition",
+            "disposition_review"}, "reopen reservation unconsumed_predecessor")
+        predecessor_path, predecessor_reservation = trusted_reopen_reservation(
+            predecessor["reservation"], "reopen reservation unconsumed_predecessor.reservation",
+            source_marker,
+        )
+        predecessor_reservation_sha = digest(
+            predecessor["reservation"]["sha256"],
+            "reopen reservation unconsumed_predecessor.reservation.sha256",
+        )
+        expected_reservation_path = source_marker / "reopen-successors" / f"{predecessor_reservation_sha}.json"
+        predecessor_package_path = bound_file(
+            predecessor["package"], "reopen reservation unconsumed_predecessor.package",
+        )
+        predecessor_review_path = bound_file(
+            predecessor["review"], "reopen reservation unconsumed_predecessor.review",
+        )
+        predecessor_registry_path = bound_file(
+            predecessor["registry"], "reopen reservation unconsumed_predecessor.registry",
+        )
+        predecessor_package = load(predecessor_package_path)
+        predecessor_registry = load(predecessor_registry_path)
+        verify_review(predecessor_review_path, predecessor_package_path)
+        predecessor_sha = sha(predecessor_package_path)
+        predecessor_operation = predecessor_package.get("operation_id")
+        predecessor_expires = integer(predecessor_package.get("expires_at_epoch"),
+            "reopen unconsumed predecessor package.expires_at_epoch", minimum=1)
+        predecessor_continuation = predecessor_package.get("continuation")
+        if (predecessor_package.get("phase") != "REOPEN"
+            or predecessor_package.get("domain") != domain
+            or predecessor_package.get("site") != reopen_package.get("site")
+            or not isinstance(predecessor_operation, str) or not HEX32.fullmatch(predecessor_operation)
+            or predecessor_operation == reopen_operation
+            or predecessor_expires > reopen_generated
+            or not isinstance(predecessor_continuation, dict)
+            or predecessor_continuation.get("remediation_package") != continuation["remediation_package"]
+            or predecessor_continuation.get("remediation_review") != continuation["remediation_review"]
+            or predecessor_continuation.get("remediation_consumption_identity")
+                != continuation["remediation_consumption_identity"]
+            or predecessor_continuation.get("coherent_plan") != continuation["coherent_plan"]
+            or predecessor_continuation.get("execution_audit") != continuation["execution_audit"]
+            or predecessor_continuation.get("reopen_reservation") != predecessor["reservation"]):
+            fail("reopen unconsumed predecessor package lineage mismatch")
+        exact_keys(predecessor_reservation, {"tool", "schema", "state", "domain", "root",
+            "source_operation_id", "source_package_sha256", "reopen_operation_id", "created_at_epoch",
+            "expires_at_epoch", "reopen_authority_sha256", "source_replay_allowed", "authority",
+            "predecessor"}, "reopen unconsumed predecessor reservation")
+        if (predecessor_reservation["tool"] != "wapp-security-emergency-reopen-reservation"
+            or predecessor_reservation["schema"] != 2
+            or predecessor_reservation["state"] != "RESERVED_FOR_DISTINCT_REOPEN"
+            or predecessor_reservation["domain"] != domain
+            or predecessor_reservation["root"] != site["root"]
+            or predecessor_reservation["source_operation_id"] != remediation["operation_id"]
+            or predecessor_reservation["source_package_sha256"] != remediation["package_sha256"]
+            or predecessor_reservation["reopen_operation_id"] != predecessor_operation
+            or predecessor_reservation["created_at_epoch"] != predecessor_package.get("generated_at_epoch")
+            or predecessor_reservation["expires_at_epoch"] != predecessor_package.get("expires_at_epoch")
+            or predecessor_reservation["reopen_authority_sha256"]
+                != reopen_authority_digest(predecessor_package)
+            or predecessor_reservation["source_replay_allowed"] is not False
+            or predecessor_reservation["authority"] is not False):
+            fail("reopen unconsumed predecessor reservation lineage mismatch")
+        if (predecessor_registry.get("tool") != "wapp-security-emergency-operator-registry"
+            or predecessor_registry.get("schema") != 1
+            or predecessor_registry.get("domain") != domain
+            or predecessor_registry.get("reopen") != {
+                "package": predecessor["package"], "review": predecessor["review"]}
+            or predecessor_registry.get("closure") is not None):
+            fail("reopen unconsumed predecessor registry lineage mismatch")
+        marker = Path(predecessor_package.get("one_shot", {}).get("consumption_marker", ""))
+        runtime = predecessor_package_path.parent / f"reopen-runtime-{predecessor_operation}"
+        if (not marker.is_absolute() or marker.exists() or marker.is_symlink()
+            or runtime.exists() or runtime.is_symlink()):
+            fail("reopen unconsumed predecessor execution absence mismatch")
+        disposition_path = bound_file(
+            predecessor["disposition"], "reopen reservation unconsumed_predecessor.disposition",
+        )
+        disposition_review_path = bound_file(
+            predecessor["disposition_review"],
+            "reopen reservation unconsumed_predecessor.disposition_review",
+        )
+        disposition = load(disposition_path)
+        verify_review(disposition_review_path, disposition_path)
+        exact_keys(disposition, {"tool", "schema", "state", "domain", "root", "source_operation_id",
+            "source_package_sha256", "predecessor_reopen_operation_id",
+            "predecessor_reopen_package_sha256", "predecessor_reservation_sha256",
+            "predecessor_registry_sha256", "predecessor_expires_at_epoch",
+            "predecessor_expired_before_successor", "consumption_marker_absent", "runtime_directory_absent",
+            "remote_access_started", "reverse_rename_started", "customer_mutation_state",
+            "replay_allowed", "supersession_authority", "generated_at_epoch", "authority"},
+            "reopen unconsumed predecessor disposition")
+        if (disposition["tool"] != "wapp-security-emergency-reopen-unconsumed-predecessor-disposition"
+            or disposition["schema"] != 1
+            or disposition["state"] != "REGISTERED_UNCONSUMED_PRECONSUMPTION_ABORT_VERIFIED_UNMUTATED"
+            or disposition["domain"] != domain or disposition["root"] != site["root"]
+            or disposition["source_operation_id"] != remediation["operation_id"]
+            or disposition["source_package_sha256"] != remediation["package_sha256"]
+            or disposition["predecessor_reopen_operation_id"] != predecessor_operation
+            or disposition["predecessor_reopen_package_sha256"] != predecessor_sha
+            or disposition["predecessor_reservation_sha256"] != predecessor_reservation_sha
+            or disposition["predecessor_registry_sha256"] != sha(predecessor_registry_path)
+            or disposition["predecessor_expires_at_epoch"] != predecessor_expires
+            or disposition["predecessor_expired_before_successor"] is not True
+            or disposition["consumption_marker_absent"] is not True
+            or disposition["runtime_directory_absent"] is not True
+            or disposition["remote_access_started"] is not False
+            or disposition["reverse_rename_started"] is not False
+            or disposition["customer_mutation_state"] != "NONE"
+            or disposition["replay_allowed"] is not False
+            or disposition["supersession_authority"] != "NEW_REOPEN_PACKAGE_ONLY"
+            or integer(disposition["generated_at_epoch"],
+                "reopen unconsumed predecessor disposition.generated_at_epoch",
+                minimum=integer(predecessor_package.get("generated_at_epoch"),
+                    "reopen unconsumed predecessor package.generated_at_epoch", minimum=1)) > reopen_generated
+            or disposition["authority"] is not False):
+            fail("reopen unconsumed predecessor disposition mismatch")
     else:
         fail("reopen reservation schema unsupported")
     if reservation_path != expected_reservation_path:
