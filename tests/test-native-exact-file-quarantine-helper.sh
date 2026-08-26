@@ -16,7 +16,7 @@ assert p['maximum_targets']==64 and p['ordering']=='CANONICAL_RELATIVE_PATH_LEXI
 assert p['binary_bytes']==len(raw) and p['binary_sha256']==hashlib.sha256(raw).hexdigest()
 assert p['encoded_bytes']==pathlib.Path(sys.argv[2]).stat().st_size and p['encoded_sha256']==hashlib.sha256(pathlib.Path(sys.argv[2]).read_bytes()).hexdigest()
 s=pathlib.Path(sys.argv[3]).read_text();
-for needle in ['RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS','SYS_renameat2','RENAME_NOREPLACE','duplicate physical target','automatic compensation failed','PARTIAL_OR_DIVERGED']:
+for needle in ['RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS','SYS_renameat2','RENAME_NOREPLACE','duplicate physical target','automatic compensation failed','PARTIAL_OR_DIVERGED','0x4a7484aa,0x5cb0a9dc,0x76f988da']:
     assert needle in s
 PY
 if [[ "$(uname -s)-$(uname -m)" != Linux-x86_64 ]];then printf 'PASS: native exact-file quarantine policy/source/artifact; Linux execution reserved for canonical matrix\n';exit 0;fi
