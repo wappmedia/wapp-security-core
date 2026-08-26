@@ -566,6 +566,188 @@ def verify_consumption_marker(marker: Path, package_sha256: str) -> Path:
     return identity
 
 
+def verify_reopen_source_lineage(
+    continuation: dict[str, Any], domain: str, site: dict[str, Any], reopen_action: dict[str, Any],
+    reopen_operation: str, reopen_generated: int, reopen_expires: int,
+) -> tuple[dict[str, Any], list[str]]:
+    """Admit a consumed remediation only as immutable reopen provenance."""
+    exact_keys(continuation, {
+        "remediation_package", "remediation_review", "remediation_registry",
+        "remediation_consumption_identity", "coherent_plan", "execution_audit",
+        "current_isolation", "reopen_reservation",
+        "isolation_identity_sha256",
+    }, "continuation")
+    remediation_path = bound_file(continuation["remediation_package"], "continuation.remediation_package")
+    remediation_review_path = bound_file(continuation["remediation_review"], "continuation.remediation_review")
+    remediation = verify_package(remediation_path, domain, historical_execution=True)
+    verify_review(remediation_review_path, remediation_path)
+    remediation_value = load(remediation_path)
+    if (remediation["phase"] != "REMEDIATION" or remediation["classification"] != "YELLOW_SELF_REMEDIATION"
+        or remediation["operation_id"] == reopen_operation or remediation_value["continuation"] is not None
+        or site != remediation_value["site"]):
+        fail("reopen consumed remediation identity mismatch")
+    consumption = bound_file(continuation["remediation_consumption_identity"], "continuation.remediation_consumption_identity")
+    if str(consumption) != remediation["consumption_identity"]:
+        fail("reopen remediation consumption identity mismatch")
+
+    registry_path = bound_file(continuation["remediation_registry"], "continuation.remediation_registry")
+    registry = load(registry_path)
+    exact_keys(registry, {"tool", "schema", "domain", "remediation", "reopen", "closure"}, "continuation remediation registry")
+    if (registry["tool"] != "wapp-security-emergency-operator-registry" or registry["schema"] != 1
+        or registry["domain"] != domain or registry["reopen"] is not None or registry["closure"] is not None
+        or not isinstance(registry["remediation"], dict)):
+        fail("reopen remediation authorization registry mismatch")
+    exact_keys(registry["remediation"], {"package", "review"}, "continuation remediation registry entry")
+    if (registry["remediation"]["package"] != continuation["remediation_package"]
+        or registry["remediation"]["review"] != continuation["remediation_review"]):
+        fail("reopen remediation registry package/review mismatch")
+
+    plan_path = bound_file(continuation["coherent_plan"], "continuation.coherent_plan")
+    plan = load(plan_path)
+    exact_keys(plan, {
+        "tool", "schema", "state", "domain", "operation_id", "root", "site_identity", "package",
+        "private_product_commit", "public_core_commit", "coordinator", "sites_config_sha256",
+        "action_contract_sha256", "action_count", "dispatch_count", "dispatch", "apply_order",
+        "rollback_order", "stages", "human_operator_required", "bounded_consumers_own_exact_mutations",
+        "filesystem_database_acid_claimed", "scope_expansion_allowed", "arbitrary_sql_allowed",
+        "canonical_ready_claimed", "mutation_authority",
+    }, "continuation coherent plan")
+    if (plan["tool"] != "wapp-security-human-operator-emergency-coordinator-plan" or plan["schema"] != 1
+        or plan["state"] != "PREPARED_NO_MUTATION" or plan["domain"] != domain
+        or plan["operation_id"] != remediation["operation_id"] or plan["root"] != remediation["root"]
+        or plan["package"] != continuation["remediation_package"] or plan["public_core_commit"] != remediation["product_commit"]
+        or not HEX64.fullmatch(string(plan["sites_config_sha256"], "continuation.coherent_plan.sites_config_sha256"))
+        or not HEX64.fullmatch(string(plan["action_contract_sha256"], "continuation.coherent_plan.action_contract_sha256"))
+        or plan["stages"] != ["PREPARED", "FILES_APPLIED", "DB_APPLIED", "IDENTITY_APPLIED", "POSTCHECK_VERIFIED"]
+        or plan["human_operator_required"] is not True or plan["bounded_consumers_own_exact_mutations"] is not True
+        or plan["filesystem_database_acid_claimed"] is not False or plan["scope_expansion_allowed"] is not False
+        or plan["arbitrary_sql_allowed"] is not False or plan["canonical_ready_claimed"] is not False
+        or plan["mutation_authority"] is not False):
+        fail("reopen coherent plan lineage/authority mismatch")
+    if (not isinstance(plan["site_identity"], dict) or plan["site_identity"].get("domain") != domain
+        or plan["site_identity"].get("wordpress_root") != remediation["root"]
+        or not re.fullmatch(r"[0-9a-f]{40}", string(plan["private_product_commit"], "continuation.coherent_plan.private_product_commit"))
+        or plan["coordinator"] != remediation_value["launcher"]):
+        fail("reopen coherent plan site/coordinator identity mismatch")
+    coordinator_path = bound_file(plan["coordinator"], "continuation.coherent_plan.coordinator", executable=True)
+    actions = remediation["actions"]
+    action_count = integer(plan["action_count"], "continuation.coherent_plan.action_count", minimum=1)
+    dispatch_count = integer(plan["dispatch_count"], "continuation.coherent_plan.dispatch_count", minimum=1)
+    dispatches = plan["dispatch"]
+    if not isinstance(dispatches, list) or action_count != len(actions) or dispatch_count != len(dispatches):
+        fail("reopen coherent plan dispatch cardinality mismatch")
+    consumer_for = {
+        "QUARANTINE_EXACT_FILE": "BOUNDED_QUARANTINE_EXACT_FILE",
+        "REPLACE_EXACT_FILE": "BOUNDED_REPLACE_EXACT_FILE",
+        "REMOVE_EXACT_ACTIVE_PLUGIN": "BOUNDED_REMOVE_EXACT_ACTIVE_PLUGIN",
+        "REMOVE_EXACT_OPTION": "BOUNDED_REMOVE_EXACT_OPTION",
+        "QUARANTINE_IDENTITY_ACCESS": "BOUNDED_IDENTITY_QUARANTINE",
+    }
+    observed_orders: list[int] = []; observed_consumers: list[str] = []; plan_dependencies: list[str] = []
+    for index, dispatch in enumerate(dispatches):
+        if not isinstance(dispatch, dict): fail("reopen coherent plan dispatch malformed")
+        exact_keys(dispatch, {"order", "stage", "consumer", "action_count", "action_orders", "binding"}, f"continuation.coherent_plan.dispatch[{index}]")
+        if integer(dispatch["order"], f"continuation.coherent_plan.dispatch[{index}].order", minimum=1) != index + 1:
+            fail("reopen coherent plan dispatch order mismatch")
+        orders = dispatch["action_orders"]
+        if not isinstance(orders, list) or integer(dispatch["action_count"], f"continuation.coherent_plan.dispatch[{index}].action_count", minimum=1) != len(orders):
+            fail("reopen coherent plan action grouping mismatch")
+        consumer = string(dispatch["consumer"], f"continuation.coherent_plan.dispatch[{index}].consumer")
+        dispatch_stage = string(dispatch["stage"], f"continuation.coherent_plan.dispatch[{index}].stage")
+        for order in orders:
+            order = integer(order, f"continuation.coherent_plan.dispatch[{index}].action_order", minimum=1)
+            if (order > len(actions) or consumer_for.get(actions[order - 1]["primitive"]) != consumer
+                or actions[order - 1]["stage"] != dispatch_stage):
+                fail("reopen coherent plan action/consumer mismatch")
+            observed_orders.append(order)
+        observed_consumers.append(consumer)
+        plan_dependencies.append(str(bound_file(dispatch["binding"], f"continuation.coherent_plan.dispatch[{index}].binding")))
+    if (observed_orders != list(range(1, len(actions) + 1)) or plan["apply_order"] != observed_consumers
+        or plan["rollback_order"] != list(reversed(observed_consumers))):
+        fail("reopen coherent plan complete ordering mismatch")
+
+    audit_path = bound_file(continuation["execution_audit"], "continuation.execution_audit")
+    _, audit_lines = bounded_text_lines(audit_path, "continuation execution audit", maximum_bytes=1024 * 1024)
+    ts = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z"
+    patterns = [
+        re.compile(rf"{ts}\tPREPARED package={re.escape(remediation['package_sha256'])} operation={re.escape(remediation['operation_id'])} plan={re.escape(sha(plan_path))} one_shot_claimed=true incident_mutation_started=false"),
+        re.compile(rf"{ts}\tISOLATION_VERIFIED rebind_sha256=[0-9a-f]{{64}} canonical_root_absent=true public_origin_denied=true incident_mutation_started=false"),
+        *[re.compile(rf"{ts}\tDISPATCH_VERIFIED order={i+1} consumer={re.escape(c)} result_sha256=[0-9a-f]{{64}}") for i,c in enumerate(observed_consumers)],
+        re.compile(rf"{ts}\tPOSTCHECK_VERIFIED completed={dispatch_count} isolation_remains=true separate_reopen_authority_required=true"),
+    ]
+    if len(audit_lines) != len(patterns) or any(pattern.fullmatch(line) is None for pattern,line in zip(patterns,audit_lines)):
+        fail("reopen execution audit exact completed lineage mismatch")
+    audit_epochs = [reconciliation_timestamp(line.split("\t", 1)[0], "continuation.execution_audit") for line in audit_lines]
+    if audit_epochs != sorted(audit_epochs) or audit_epochs[-1] > reopen_generated:
+        fail("reopen execution audit time ordering mismatch")
+
+    isolation_identity = canonical_digest({"site": remediation_value["site"], "isolation": remediation_value["isolation"]})
+
+    observation_path = bound_file(continuation["current_isolation"], "continuation.current_isolation")
+    observation = load(observation_path)
+    exact_keys(observation, {"tool", "schema", "state", "domain", "operation_id", "canonical_root",
+        "isolated_root", "canonical_root_present", "isolated_root_present", "path_chain_no_symlinks",
+        "root", "wp_config", "private_parents", "capture_nonce", "captured_at_epoch"}, "continuation current isolation")
+    if not isinstance(observation["root"], dict) or not isinstance(observation["wp_config"], dict):
+        fail("reopen current isolated metadata malformed")
+    exact_keys(observation["root"], {"device", "inode", "type", "nlink", "uid", "gid", "mode", "size", "mtime_ns", "ctime_ns"}, "continuation.current_isolation.root")
+    exact_keys(observation["wp_config"], {"relative_path", "device", "inode", "type", "nlink", "uid", "gid", "mode", "size", "mtime_ns", "ctime_ns", "sha256", "symlink"}, "continuation.current_isolation.wp_config")
+    parents = observation["private_parents"]
+    if not isinstance(parents, list) or not parents:
+        fail("reopen current isolation private parent lineage missing")
+    for index, parent in enumerate(parents):
+        if not isinstance(parent, dict):
+            fail("reopen current isolation private parent malformed")
+        exact_keys(parent, {"path", "device", "inode", "type", "uid", "gid", "mode", "mtime_ns", "ctime_ns", "symlink"}, f"continuation.current_isolation.private_parents[{index}]")
+        if parent["type"] != "directory" or parent["symlink"] is not False:
+            fail("reopen current isolation private parent trust mismatch")
+    captured = integer(observation["captured_at_epoch"], "continuation.current_isolation.captured_at_epoch", minimum=1)
+    parent_paths: set[str] = set()
+    for parent in parents:
+        parent_path = absolute(parent["path"], "continuation.current_isolation.private_parent.path")
+        if parent_path in parent_paths or parent["device"] != site["root_device"] or not re.fullmatch(r"[0-7]{4}", parent["mode"]):
+            fail("reopen current isolation private parent identity mismatch")
+        parent_paths.add(parent_path)
+        if int(parent["mode"], 8) & 0o022:
+            fail("reopen current isolation private parent is group/world writable")
+    if (observation["tool"] != "wapp-security-isolated-root-observation" or observation["schema"] != 2
+        or observation["state"] != "ISOLATED_EXACT" or observation["domain"] != domain
+        or observation["operation_id"] != remediation["operation_id"] or observation["canonical_root"] != site["root"]
+        or observation["isolated_root"] != reopen_action["target"]["isolated_root"] or observation["canonical_root_present"] is not False
+        or observation["isolated_root_present"] is not True or observation["path_chain_no_symlinks"] is not True
+        or observation["root"].get("device") != site["root_device"] or observation["root"].get("inode") != site["root_inode"]
+        or observation["root"]["type"] != "directory" or observation["root"]["nlink"] == "0"
+        or observation["wp_config"].get("relative_path") != "wp-config.php" or observation["wp_config"].get("type") != "file"
+        or observation["wp_config"].get("device") != site["root_device"] or observation["wp_config"].get("symlink") is not False
+        or observation["wp_config"].get("nlink") != "1"
+        or not HEX64.fullmatch(observation["wp_config"].get("sha256", "")) or not HEX64.fullmatch(observation["capture_nonce"])
+        or captured < audit_epochs[-1] or captured > reopen_generated or reopen_generated - captured > 300):
+        fail("reopen current isolated state mismatch/stale")
+
+    reservation_path = bound_file(continuation["reopen_reservation"], "continuation.reopen_reservation")
+    source_marker = Path(remediation_value["one_shot"]["consumption_marker"])
+    if reservation_path != source_marker / "reopen-reservation.json": fail("reopen reservation path mismatch")
+    completed_reopen = source_marker / "reopen-completed"
+    if completed_reopen.exists() or completed_reopen.is_symlink():
+        fail("source remediation lineage already has a completed reopen")
+    reservation = load(reservation_path)
+    exact_keys(reservation, {"tool", "schema", "state", "domain", "root", "source_operation_id",
+        "source_package_sha256", "reopen_operation_id", "created_at_epoch", "expires_at_epoch",
+        "source_replay_allowed", "authority"}, "reopen reservation")
+    if (reservation["tool"] != "wapp-security-emergency-reopen-reservation" or reservation["schema"] != 1
+        or reservation["state"] != "RESERVED_FOR_DISTINCT_REOPEN" or reservation["domain"] != domain
+        or reservation["root"] != site["root"] or reservation["source_operation_id"] != remediation["operation_id"]
+        or reservation["source_package_sha256"] != remediation["package_sha256"]
+        or reservation["reopen_operation_id"] != reopen_operation or reservation["created_at_epoch"] != reopen_generated
+        or reservation["expires_at_epoch"] != reopen_expires or reservation["source_replay_allowed"] is not False
+        or reservation["authority"] is not False):
+        fail("reopen reservation lineage mismatch")
+    if digest(continuation["isolation_identity_sha256"], "continuation.isolation_identity_sha256") != isolation_identity:
+        fail("reopen isolation identity mismatch")
+    return remediation, [str(remediation_path), str(remediation_review_path), str(consumption), str(registry_path),
+        str(plan_path), str(coordinator_path), *plan_dependencies, str(audit_path), str(observation_path), str(reservation_path)]
+
+
 def verify_package(
     path: Path,
     domain: str,
@@ -610,6 +792,8 @@ def verify_package(
     generated = integer(value["generated_at_epoch"], "generated_at_epoch", minimum=1)
     expires = integer(value["expires_at_epoch"], "expires_at_epoch", minimum=generated + 1)
     current_time = int(time.time()) if now is None else now
+    if not historical_execution and generated > current_time:
+        fail("package is future dated")
     if not historical_execution and current_time >= expires:
         fail("package expired")
 
@@ -680,59 +864,22 @@ def verify_package(
 
     continuation = value["continuation"]
     continuation_dependencies: list[str] = []
+    source_remediation_marker: str | None = None
+    reopen_source_lineage_state = ""
     if phase == "REMEDIATION":
         if continuation is not None:
             fail("remediation package cannot carry reopen continuation")
     else:
         if not isinstance(continuation, dict):
             fail("reopen continuation is required")
-        exact_keys(
-            continuation,
-            {"remediation_package", "remediation_review", "execution_postcheck", "isolation_identity_sha256"},
-            "continuation",
+        remediation, continuation_dependencies = verify_reopen_source_lineage(
+            continuation, domain, site, actions[0], operation, generated, expires,
         )
-        remediation_path = bound_file(continuation["remediation_package"], "continuation.remediation_package")
-        remediation_review_path = bound_file(continuation["remediation_review"], "continuation.remediation_review")
-        remediation = verify_package(remediation_path, domain, now=current_time)
-        verify_review(remediation_review_path, remediation_path)
-        if remediation["phase"] != "REMEDIATION" or remediation["classification"] != "YELLOW_SELF_REMEDIATION":
-            fail("reopen continuation remediation identity mismatch")
-        remediation_value = load(remediation_path)
-        isolation_identity = canonical_digest({"site": remediation_value["site"], "isolation": remediation_value["isolation"]})
-        if digest(continuation["isolation_identity_sha256"], "continuation.isolation_identity_sha256") != isolation_identity:
-            fail("reopen isolation identity mismatch")
-        if site != remediation_value["site"] or value["product"] != remediation_value["product"]:
-            fail("reopen site/Product lineage mismatch")
-        postcheck_path = bound_file(continuation["execution_postcheck"], "continuation.execution_postcheck")
-        postcheck = load(postcheck_path)
-        exact_keys(
-            postcheck,
-            {
-                "tool", "schema", "state", "domain", "root", "remediation_operation_id",
-                "remediation_package_sha256", "isolation_identity_sha256", "isolated_root",
-                "isolation_active", "recurrence", "incident_targets_absent", "generated_at_epoch",
-            },
-            "execution_postcheck",
-        )
-        if postcheck["tool"] != "wapp-security-emergency-execution-postcheck" or postcheck["schema"] != 1:
-            fail("execution postcheck protocol mismatch")
-        postcheck_generated = integer(postcheck["generated_at_epoch"], "execution_postcheck.generated_at_epoch", minimum=remediation["generated_at_epoch"])
-        if postcheck_generated > current_time:
-            fail("execution postcheck is future dated")
-        if (
-            postcheck["state"] != "APPLIED_EXACT_AND_POSTCHECK_VERIFIED_YELLOW"
-            or postcheck["domain"] != domain
-            or postcheck["root"] != site["root"]
-            or postcheck["remediation_operation_id"] != remediation["operation_id"]
-            or postcheck["remediation_package_sha256"] != remediation["package_sha256"]
-            or postcheck["isolation_identity_sha256"] != isolation_identity
-            or postcheck["isolated_root"] != actions[0]["target"]["isolated_root"]
-            or postcheck["isolation_active"] is not True
-            or postcheck["recurrence"] is not False
-            or postcheck["incident_targets_absent"] is not True
-        ):
-            fail("execution postcheck/reopen continuation mismatch")
-        continuation_dependencies.extend([str(remediation_path), str(remediation_review_path), str(postcheck_path)])
+        source_remediation_marker = remediation["consumption_marker"]
+        reopen_source_lineage_state = "CONSUMED_EXECUTED_REMEDIATION_LINEAGE_VERIFIED_FOR_REOPEN"
+        if (actions[0]["target"]["device"] != site["root_device"]
+            or actions[0]["target"]["inode"] != site["root_inode"]):
+            fail("reopen action root identity mismatch")
 
     gate = value["human_gate"]
     if not isinstance(gate, dict):
@@ -752,6 +899,8 @@ def verify_package(
     if boolean(one_shot["required"], "one_shot.required") is not True:
         fail("one-shot contract required")
     marker = Path(absolute(one_shot["consumption_marker"], "one_shot.consumption_marker"))
+    if source_remediation_marker is not None and str(marker) == source_remediation_marker:
+        fail("reopen cannot reuse remediation consumption marker")
     package_sha256 = sha(path)
     consumption_identity: Path | None = None
     if historical_execution:
@@ -835,6 +984,7 @@ def verify_package(
         "consumption_marker": str(marker),
         "consumption_identity": str(consumption_identity) if consumption_identity else "",
         "product_commit": value["product"]["commit"],
+        "reopen_source_lineage_state": reopen_source_lineage_state,
     }
 
 
@@ -2021,7 +2171,12 @@ def verify_closure(path: Path, domain: str, *, now: int | None = None) -> dict[s
             exact_keys(entry, expected_entry, f"closure.{phase}")
             package_path = bound_file(entry["package"], f"closure.{phase}.package")
             review_path = bound_file(entry["review"], f"closure.{phase}.review")
-            summary = verify_package(package_path, domain, now=generated)
+            summary = verify_package(
+                package_path,
+                domain,
+                now=generated,
+                historical_execution=(phase == "remediation"),
+            )
             verify_review(review_path, package_path)
             if summary["phase"] != phase.upper() or summary["root"] != root:
                 fail(f"closure.{phase} package lineage mismatch")

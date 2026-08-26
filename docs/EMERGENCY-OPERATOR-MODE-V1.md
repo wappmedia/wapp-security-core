@@ -26,10 +26,21 @@ preflight, isolation, stability, mutation, recurrence and postcheck contracts.
 The generic CLI also requires that exact package-bound phrase from a fresh
 interactive terminal; approval cannot be supplied through argv or environment.
 
-Reopen is a separate registry entry and one-shot package. It is bound to the
-exact reviewed remediation package, its verified execution/postcheck record and
-the still-active isolation identity. It may only reverse that exact isolation
-operation and must re-isolate on a failed post-open check.
+Reopen is a separate registry entry and one-shot package. Its source remediation
+must already be consumed and is admitted only through the explicit
+`CONSUMED_EXECUTED_REMEDIATION_LINEAGE_VERIFIED_FOR_REOPEN` semantics: exact
+source package/review/registry/consumption identity, coherent plan, completed
+signed execution audit, exact dispatch cardinality and a fresh exact-isolation
+observation must all agree. The consumed package is immutable historical
+provenance only; normal remediation validation continues to reject it.
+
+The distinct reopen has a new operation, package expiry, human phrase, review,
+registry authority and consumption marker. A fixed, source-marker-bound reopen
+reservation prevents two distinct reopen continuations from the same lineage.
+The reservation does not authorize source replay and remains part of the audit
+lineage after reopen. Reusing the remediation operation, review, marker or human
+approval fails closed. Reopen may only reverse the exact active isolation and
+must re-isolate on a failed post-open check.
 
 ## Supported package primitives
 

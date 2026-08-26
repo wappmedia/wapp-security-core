@@ -138,42 +138,73 @@ open(package,'w').write(json.dumps(v,sort_keys=True,separators=(',',':'))+'\n')
 PY
 sign "$package";package_sha="$(recovery_sha256_file "$package")"
 review="$run/review.json";make_review "$package" "$review"
-postcheck="$run/execution-postcheck.json";python3 - "$package" "$postcheck" "$domain" "$now" <<'PY'
-import hashlib,json,sys
-package,out,domain,now=sys.argv[1],sys.argv[2],sys.argv[3],int(sys.argv[4]);v=json.load(open(package));canonical=lambda x:json.dumps(x,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode();isolation=hashlib.sha256(canonical({'site':v['site'],'isolation':v['isolation']})).hexdigest()
-p={'tool':'wapp-security-emergency-execution-postcheck','schema':1,'state':'APPLIED_EXACT_AND_POSTCHECK_VERIFIED_YELLOW','domain':domain,'root':v['site']['root'],'remediation_operation_id':v['operation_id'],'remediation_package_sha256':hashlib.sha256(open(package,'rb').read()).hexdigest(),'isolation_identity_sha256':isolation,'isolated_root':'/home/user_42/.wapp-security/human-emergency/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/app_42','isolation_active':True,'recurrence':False,'incident_targets_absent':True,'generated_at_epoch':now};open(out,'w').write(json.dumps(p,sort_keys=True,separators=(',',':'))+'\n')
-PY
-sign "$postcheck"
-reopen="$run/reopen-package.json";python3 - "$package" "$review" "$postcheck" "$reopen" "$run" <<'PY'
-import hashlib,json,os,sys
-src,review,postcheck,out,run=sys.argv[1:];v=json.load(open(src));ref=lambda p:{'path':p,'sha256':hashlib.sha256(open(p,'rb').read()).hexdigest()};p=json.load(open(postcheck));v['phase']='REOPEN';v['operation_id']='b'*32;v['actions']=[{'order':1,'primitive':'REOPEN_ATOMIC_DOCROOT','stage':'REOPEN','target':{'canonical_root':'/home/user_42/app_42','isolated_root':p['isolated_root'],'device':'1','inode':'2'},'before':{'sha256':'1'*64,'bytes':1},'after':{'sha256':'2'*64,'bytes':1},'rollback':{'artifact':v['evidence']['rollback_index'],'restores':'EXACT_ORIGINAL','automatic':True}}];v['continuation']={'remediation_package':ref(src),'remediation_review':ref(review),'execution_postcheck':ref(postcheck),'isolation_identity_sha256':p['isolation_identity_sha256']};v['human_gate']['phrase_format']='ÅTERÖPPNA <DOMAIN> <PACKAGE_SHA256_12>';v['one_shot']['consumption_marker']=os.path.join(run,'reopen-consumed');open(out,'w').write(json.dumps(v,sort_keys=True,separators=(',',':'))+'\n')
-PY
-sign "$reopen";reopen_sha="$(recovery_sha256_file "$reopen")";reopen_review="$run/reopen-review.json";make_review "$reopen" "$reopen_review"
-
-reopen_postcheck="$run/reopen-postcheck.json";python3 - "$package" "$reopen" "$reopen_postcheck" "$domain" "$now" <<'PY'
-import hashlib,json,sys
-remediation,reopen,out,domain,now=sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4],int(sys.argv[5]);rem=json.load(open(remediation));rep=json.load(open(reopen));value={'tool':'wapp-security-emergency-reopen-postcheck','schema':1,'state':'POSTOPEN_VERIFIED_YELLOW','domain':domain,'root':rem['site']['root'],'reopen_operation_id':rep['operation_id'],'reopen_package_sha256':hashlib.sha256(open(reopen,'rb').read()).hexdigest(),'remediation_operation_id':rem['operation_id'],'remediation_package_sha256':hashlib.sha256(open(remediation,'rb').read()).hexdigest(),'generated_at_epoch':now,'isolation_reversed':True,'post_open_verified':True,'recurrence':False,'incident_targets_absent':True};open(out,'w').write(json.dumps(value,sort_keys=True,separators=(',',':'))+'\n')
-PY
-sign "$reopen_postcheck"
-
-closure="$run/closure.json"
-python3 - "$run" "$closure" "$domain" "$now" "$package" "$review" "$reopen" "$reopen_review" "$reopen_postcheck" <<'PY'
-import hashlib,json,os,sys
-run,out,domain,now,package,review,reopen,reopen_review,reopen_postcheck=sys.argv[1],sys.argv[2],sys.argv[3],int(sys.argv[4]),*sys.argv[5:];ref=lambda p:{'path':p,'sha256':hashlib.sha256(open(p,'rb').read()).hexdigest()};rem=json.load(open(package));p=os.path.join(run,'closure-evidence.json');checks={'critical':0,'high':0,'filesystem_complete':True,'database_complete':True,'runtime_ok':True,'recurrence':False,'unknown_executable_persistence':False,'unresolved_malicious_privileged_access':False,'incident_targets_absent':True};e={'tool':'wapp-security-emergency-closure-evidence','schema':1,'domain':domain,'root':rem['site']['root'],'operation_id':rem['operation_id'],'product_commit':rem['product']['commit'],'generated_at_epoch':now,'scan':{'critical':checks['critical'],'high':checks['high']},'coverage':{'filesystem_complete':checks['filesystem_complete'],'database_complete':checks['database_complete'],'runtime_ok':checks['runtime_ok']},'recurrence':{'detected':checks['recurrence'],'unknown_executable_persistence':checks['unknown_executable_persistence'],'incident_targets_absent':checks['incident_targets_absent']},'identity':{'unresolved_malicious_privileged_access':checks['unresolved_malicious_privileged_access']}};open(p,'w').write(json.dumps(e,sort_keys=True,separators=(',',':'))+'\n')
-v={'tool':'wapp-security-emergency-closure-record','schema':1,'domain':domain,'root':rem['site']['root'],'operation_id':rem['operation_id'],'generated_at_epoch':now,'fresh_until_epoch':now+3600,'product':rem['product'],'remediation':{'package':ref(package),'review':ref(review)},'reopen':{'package':ref(reopen),'review':ref(reopen_review),'execution_postcheck':ref(reopen_postcheck)},'evidence':[ref(p)],'checks':checks,'assurance_limitations':[],'hardening_findings':['synthetic permission hardening'],'authority':False}
-open(out,'w').write(json.dumps(v,sort_keys=True,separators=(',',':'))+'\n')
-PY
-sign "$run/closure-evidence.json"
-sign "$closure"
+postcheck="$run/execution-postcheck.json";reopen="$run/reopen-package.json";reopen_review="$run/reopen-review.json";reopen_postcheck="$run/reopen-postcheck.json";closure="$run/closure.json"
 registry="$WAPP_EMERGENCY_REPORTS_ROOT/.control/emergency-operator-v1/$domain.json"
-python3 - "$package" "$review" "$reopen" "$reopen_review" "$closure" "$registry" "$domain" <<'PY'
+python3 - "$package" "$review" "$registry" "$domain" <<'PY'
 import hashlib,json,sys
-package,review,reopen,reopen_review,closure,out,domain=sys.argv[1:]
+package,review,out,domain=sys.argv[1:]
 def ref(p):return {'path':p,'sha256':hashlib.sha256(open(p,'rb').read()).hexdigest()}
-v={'tool':'wapp-security-emergency-operator-registry','schema':1,'domain':domain,'remediation':{'package':ref(package),'review':ref(review)},'reopen':{'package':ref(reopen),'review':ref(reopen_review)},'closure':{'record':ref(closure)}}
+v={'tool':'wapp-security-emergency-operator-registry','schema':1,'domain':domain,'remediation':{'package':ref(package),'review':ref(review)},'reopen':None,'closure':None}
 open(out,'w').write(json.dumps(v,sort_keys=True,separators=(',',':'))+'\n')
 PY
 sign "$registry"
+
+build_consumed_reopen_fixture(){
+  local plan="$run/coherent-plan.json" audit="$run/coordinator-execution-audit.log"
+  local observation="$run/current-isolated-observation.json" source_registry="$run/source-registry.json"
+  local reservation="$run/consumed/reopen-reservation.json"
+  mkdir -m 700 "$run/consumed"
+  printf '%s\n' "$package_sha" >"$run/consumed/package-sha256";chmod 600 "$run/consumed/package-sha256";sign "$run/consumed/package-sha256"
+  python3 - "$package" "$review" "$run" "$plan" "$audit" "$observation" "$source_registry" "$reservation" "$reopen" "$domain" "$now" <<'PY'
+import datetime,hashlib,json,os,sys
+package,review,run,plan_path,audit_path,observation_path,registry_path,reservation_path,reopen_path,domain,now=sys.argv[1:]
+now=int(now);source=json.load(open(package));source_sha=hashlib.sha256(open(package,'rb').read()).hexdigest()
+def dump(path,value): open(path,'w').write(json.dumps(value,sort_keys=True,separators=(',',':'))+'\n')
+def ref(path): return {'path':path,'sha256':hashlib.sha256(open(path,'rb').read()).hexdigest()}
+def canonical(value): return json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()
+consumer_for={'QUARANTINE_EXACT_FILE':'BOUNDED_QUARANTINE_EXACT_FILE','REPLACE_EXACT_FILE':'BOUNDED_REPLACE_EXACT_FILE','REMOVE_EXACT_ACTIVE_PLUGIN':'BOUNDED_REMOVE_EXACT_ACTIVE_PLUGIN','REMOVE_EXACT_OPTION':'BOUNDED_REMOVE_EXACT_OPTION','QUARANTINE_IDENTITY_ACCESS':'BOUNDED_IDENTITY_QUARANTINE'}
+dispatch=[]
+for index,action in enumerate(source['actions'],1):
+    binding=os.path.join(run,f'dispatch-binding-{index}.json')
+    dump(binding,{'tool':'synthetic-bounded-dispatch-binding','schema':1,'operation_id':source['operation_id'],'action_order':index,'primitive':action['primitive'],'authority':False})
+    dispatch.append({'order':index,'stage':action['stage'],'consumer':consumer_for[action['primitive']],'action_count':1,'action_orders':[index],'binding':ref(binding)})
+plan={'tool':'wapp-security-human-operator-emergency-coordinator-plan','schema':1,'state':'PREPARED_NO_MUTATION','domain':domain,'operation_id':source['operation_id'],'root':source['site']['root'],'site_identity':{'domain':domain,'wordpress_root':source['site']['root']},'package':ref(package),'private_product_commit':source['product']['commit'],'public_core_commit':source['product']['commit'],'coordinator':ref(os.path.join(run,'launcher')),'sites_config_sha256':'1'*64,'action_contract_sha256':'2'*64,'action_count':len(source['actions']),'dispatch_count':len(dispatch),'dispatch':dispatch,'apply_order':[item['consumer'] for item in dispatch],'rollback_order':[item['consumer'] for item in reversed(dispatch)],'stages':['PREPARED','FILES_APPLIED','DB_APPLIED','IDENTITY_APPLIED','POSTCHECK_VERIFIED'],'human_operator_required':True,'bounded_consumers_own_exact_mutations':True,'filesystem_database_acid_claimed':False,'scope_expansion_allowed':False,'arbitrary_sql_allowed':False,'canonical_ready_claimed':False,'mutation_authority':False}
+dump(plan_path,plan)
+stamp=datetime.datetime.fromtimestamp(now,datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+lines=[f'{stamp}\tPREPARED package={source_sha} operation={source["operation_id"]} plan={hashlib.sha256(open(plan_path,"rb").read()).hexdigest()} one_shot_claimed=true incident_mutation_started=false',f'{stamp}\tISOLATION_VERIFIED rebind_sha256={"3"*64} canonical_root_absent=true public_origin_denied=true incident_mutation_started=false']
+for index,item in enumerate(dispatch,1): lines.append(f'{stamp}\tDISPATCH_VERIFIED order={index} consumer={item["consumer"]} result_sha256={str(index%10)*64}')
+lines.append(f'{stamp}\tPOSTCHECK_VERIFIED completed={len(dispatch)} isolation_remains=true separate_reopen_authority_required=true')
+open(audit_path,'w').write('\n'.join(lines)+'\n')
+isolated='/home/user_42/.wapp-security/human-emergency/'+source['operation_id']+'/app_42'
+observation={'tool':'wapp-security-isolated-root-observation','schema':2,'state':'ISOLATED_EXACT','domain':domain,'operation_id':source['operation_id'],'canonical_root':source['site']['root'],'isolated_root':isolated,'canonical_root_present':False,'isolated_root_present':True,'path_chain_no_symlinks':True,'root':{'device':'1','inode':'2','type':'directory','nlink':'2','uid':'42','gid':'42','mode':'0755','size':'4096','mtime_ns':'1','ctime_ns':'2'},'wp_config':{'relative_path':'wp-config.php','device':'1','inode':'4','type':'file','nlink':'1','uid':'42','gid':'42','mode':'0644','size':'100','mtime_ns':'1','ctime_ns':'2','sha256':'4'*64,'symlink':False},'private_parents':[{'path':'/home/user_42/.wapp-security','device':'1','inode':'5','type':'directory','uid':'42','gid':'42','mode':'0700','mtime_ns':'1','ctime_ns':'1','symlink':False}], 'capture_nonce':'5'*64,'captured_at_epoch':now}
+dump(observation_path,observation)
+registry={'tool':'wapp-security-emergency-operator-registry','schema':1,'domain':domain,'remediation':{'package':ref(package),'review':ref(review)},'reopen':None,'closure':None};dump(registry_path,registry)
+reopen=json.loads(json.dumps(source));reopen['phase']='REOPEN';reopen['operation_id']='b'*32;reopen['generated_at_epoch']=now;reopen['expires_at_epoch']=now+3600
+reservation={'tool':'wapp-security-emergency-reopen-reservation','schema':1,'state':'RESERVED_FOR_DISTINCT_REOPEN','domain':domain,'root':source['site']['root'],'source_operation_id':source['operation_id'],'source_package_sha256':source_sha,'reopen_operation_id':reopen['operation_id'],'created_at_epoch':now,'expires_at_epoch':now+3600,'source_replay_allowed':False,'authority':False};dump(reservation_path,reservation)
+isolation=hashlib.sha256(canonical({'site':source['site'],'isolation':source['isolation']})).hexdigest()
+reopen['actions']=[{'order':1,'primitive':'REOPEN_ATOMIC_DOCROOT','stage':'REOPEN','target':{'canonical_root':source['site']['root'],'isolated_root':isolated,'device':'1','inode':'2'},'before':{'sha256':'1'*64,'bytes':1},'after':{'sha256':'2'*64,'bytes':1},'rollback':{'artifact':source['evidence']['rollback_index'],'restores':'EXACT_ORIGINAL','automatic':True}}]
+reopen['continuation']={'remediation_package':ref(package),'remediation_review':ref(review),'remediation_registry':ref(registry_path),'remediation_consumption_identity':ref(os.path.join(run,'consumed/package-sha256')),'coherent_plan':ref(plan_path),'execution_audit':ref(audit_path),'current_isolation':ref(observation_path),'reopen_reservation':ref(reservation_path),'isolation_identity_sha256':isolation}
+reopen['human_gate']['phrase_format']='ÅTERÖPPNA <DOMAIN> <PACKAGE_SHA256_12>';reopen['one_shot']['consumption_marker']=os.path.join(run,'reopen-consumed');dump(reopen_path,reopen)
+PY
+  for file in "$run"/dispatch-binding-*.json "$plan" "$audit" "$observation" "$source_registry" "$reservation" "$reopen";do sign "$file";done
+  python3 - "$package" "$observation" "$postcheck" "$domain" "$now" <<'PY'
+import hashlib,json,sys
+package,observation,out,domain,now=sys.argv[1:];source=json.load(open(package));current=json.load(open(observation));canonical=lambda value:json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode();value={'tool':'wapp-security-emergency-execution-postcheck','schema':1,'state':'APPLIED_EXACT_AND_POSTCHECK_VERIFIED_YELLOW','domain':domain,'root':source['site']['root'],'remediation_operation_id':source['operation_id'],'remediation_package_sha256':hashlib.sha256(open(package,'rb').read()).hexdigest(),'isolation_identity_sha256':hashlib.sha256(canonical({'site':source['site'],'isolation':source['isolation']})).hexdigest(),'isolated_root':current['isolated_root'],'isolation_active':True,'recurrence':False,'incident_targets_absent':True,'generated_at_epoch':int(now)};open(out,'w').write(json.dumps(value,sort_keys=True,separators=(',',':'))+'\n')
+PY
+  sign "$postcheck"
+  reopen_sha="$(recovery_sha256_file "$reopen")";make_review "$reopen" "$reopen_review"
+  python3 - "$run" "$closure" "$domain" "$now" "$package" "$review" "$reopen" "$reopen_review" "$reopen_postcheck" "$registry" <<'PY'
+import hashlib,json,os,sys
+run,out,domain,now,package,review,reopen,reopen_review,reopen_postcheck,registry=sys.argv[1],sys.argv[2],sys.argv[3],int(sys.argv[4]),*sys.argv[5:]
+def ref(path):return {'path':path,'sha256':hashlib.sha256(open(path,'rb').read()).hexdigest()}
+rem=json.load(open(package));rep=json.load(open(reopen));checks={'critical':0,'high':0,'filesystem_complete':True,'database_complete':True,'runtime_ok':True,'recurrence':False,'unknown_executable_persistence':False,'unresolved_malicious_privileged_access':False,'incident_targets_absent':True}
+evidence=os.path.join(run,'closure-evidence.json');value={'tool':'wapp-security-emergency-closure-evidence','schema':1,'domain':domain,'root':rem['site']['root'],'operation_id':rem['operation_id'],'product_commit':rem['product']['commit'],'generated_at_epoch':now,'scan':{'critical':0,'high':0},'coverage':{'filesystem_complete':True,'database_complete':True,'runtime_ok':True},'recurrence':{'detected':False,'unknown_executable_persistence':False,'incident_targets_absent':True},'identity':{'unresolved_malicious_privileged_access':False}};open(evidence,'w').write(json.dumps(value,sort_keys=True,separators=(',',':'))+'\n')
+post={'tool':'wapp-security-emergency-reopen-postcheck','schema':1,'state':'POSTOPEN_VERIFIED_YELLOW','domain':domain,'root':rem['site']['root'],'reopen_operation_id':rep['operation_id'],'reopen_package_sha256':ref(reopen)['sha256'],'remediation_operation_id':rem['operation_id'],'remediation_package_sha256':ref(package)['sha256'],'generated_at_epoch':now,'isolation_reversed':True,'post_open_verified':True,'recurrence':False,'incident_targets_absent':True};open(reopen_postcheck,'w').write(json.dumps(post,sort_keys=True,separators=(',',':'))+'\n')
+closure={'tool':'wapp-security-emergency-closure-record','schema':1,'domain':domain,'root':rem['site']['root'],'operation_id':rem['operation_id'],'generated_at_epoch':now,'fresh_until_epoch':now+3600,'product':rem['product'],'remediation':{'package':ref(package),'review':ref(review)},'reopen':{'package':ref(reopen),'review':ref(reopen_review),'execution_postcheck':ref(reopen_postcheck)},'evidence':[ref(evidence)],'checks':checks,'assurance_limitations':[],'hardening_findings':['synthetic permission hardening'],'authority':False};open(out,'w').write(json.dumps(closure,sort_keys=True,separators=(',',':'))+'\n')
+active={'tool':'wapp-security-emergency-operator-registry','schema':1,'domain':domain,'remediation':{'package':ref(package),'review':ref(review)},'reopen':{'package':ref(reopen),'review':ref(reopen_review)},'closure':{'record':ref(out)}};open(registry,'w').write(json.dumps(active,sort_keys=True,separators=(',',':'))+'\n')
+PY
+  for file in "$run/closure-evidence.json" "$reopen_postcheck" "$closure" "$registry";do sign "$file";done
+}
 
 out="$TMP/review.out";bash "$CLI" "$domain" >"$out";grep -Fq 'YELLOW_SELF_REMEDIATION' "$out"||fail review_class;grep -Fq 'malicious file.php' "$out"||fail path_with_spaces;grep -Fq 'Authority: HUMAN OPERATOR ONLY' "$out"||fail noncanonical_label;pass valid_package_review
 python3 - "$review" "$run/hmac-only-review.json" <<'PY'
@@ -238,13 +269,61 @@ PY
 pass post_human_dependency_drift
 printf '{"tool":"synthetic","schema":1,"domain":"%s","root":"/home/user_42/app_42","name":"incident"}\n' "$domain" >"$run/incident.json";sign "$run/incident.json"
 python3 "$MODEL" exec-launcher --launcher "$run/launcher" --sha256 "$(recovery_sha256_file "$run/launcher")" --package-sha256 "$package_sha" >"$TMP/execute.out";grep -Fq 'SYNTHETIC REVIEWED LAUNCHER — NO TARGET ACCESS' "$TMP/execute.out"||fail pinned_launcher_execution;pass pinned_launcher_execution
+build_consumed_reopen_fixture
+expect_fail consumed_remediation_replay python3 "$MODEL" verify-package --package "$package" --domain "$domain" --now-epoch "$now"
 [[ "$(python3 "$MODEL" verify-package --package "$reopen" --domain "$domain" --now-epoch "$now" | python3 -c 'import json,sys;print(json.load(sys.stdin)["human_phrase"])')" == "ÅTERÖPPNA $domain ${reopen_sha:0:12}" ]] || fail reopen_phrase;pass separate_reopen_contract
+mv "$run/consumed" "$run/consumed.hidden";expect_fail reopen_unconsumed_source python3 "$MODEL" verify-package --package "$reopen" --domain "$domain" --now-epoch "$now";mv "$run/consumed.hidden" "$run/consumed"
+mv "$run/coordinator-execution-audit.log" "$run/coordinator-execution-audit.log.hidden";expect_fail reopen_consumed_without_audit python3 "$MODEL" verify-package --package "$reopen" --domain "$domain" --now-epoch "$now";mv "$run/coordinator-execution-audit.log.hidden" "$run/coordinator-execution-audit.log"
+python3 - "$reopen" "$run" "$run/hmac-only-review.json" <<'PY'
+import hashlib,json,os,sys
+source,run,wrong_review=sys.argv[1:]
+def dump(path,value):open(path,'w').write(json.dumps(value,sort_keys=True,separators=(',',':'))+'\n')
+def ref(path):return {'path':path,'sha256':hashlib.sha256(open(path,'rb').read()).hexdigest()}
+base=json.load(open(source))
+def artifact_variant(name,key,mutate):
+    original=base['continuation'][key]['path'];out=os.path.join(run,name+'-artifact')
+    if original.endswith('.json'):
+        value=json.load(open(original));mutate(value);dump(out,value)
+    else:
+        lines=open(original).read().splitlines();mutate(lines);open(out,'w').write('\n'.join(lines)+'\n')
+    package=json.loads(json.dumps(base));package['continuation'][key]=ref(out);dump(os.path.join(run,name+'.json'),package)
+artifact_variant('reopen-failed-execution','execution_audit',lambda lines: lines.__setitem__(-1,lines[-1].replace('POSTCHECK_VERIFIED','POSTCHECK_FAILED')))
+artifact_variant('reopen-partial-dispatch','execution_audit',lambda lines: lines.pop(-2))
+artifact_variant('reopen-wrong-dispatch-count','execution_audit',lambda lines: lines.__setitem__(-1,lines[-1].replace('completed=5','completed=4')))
+artifact_variant('reopen-audit-package-mismatch','execution_audit',lambda lines: lines.__setitem__(0,lines[0].replace(base['continuation']['remediation_package']['sha256'],'9'*64)))
+artifact_variant('reopen-conflicting-rollback','execution_audit',lambda lines: lines.insert(-1,lines[-1].split('\t',1)[0]+'\tROLLBACK_STARTED reason=unexpected'))
+artifact_variant('reopen-current-root-present','current_isolation',lambda value:value.__setitem__('canonical_root_present',True))
+artifact_variant('reopen-current-wrong-inode','current_isolation',lambda value:value['root'].__setitem__('inode','999'))
+artifact_variant('reopen-current-wrong-operation','current_isolation',lambda value:value.__setitem__('operation_id','c'*32))
+artifact_variant('reopen-plan-target-mismatch','coherent_plan',lambda value:value['dispatch'][0].__setitem__('action_orders',[2]))
+artifact_variant('reopen-registry-mismatch','remediation_registry',lambda value:value['remediation'].__setitem__('review',ref(wrong_review)))
+artifact_variant('reopen-reservation-substitution','reopen_reservation',lambda value:value.__setitem__('reopen_operation_id','c'*32))
+package=json.loads(json.dumps(base));package['continuation']['remediation_review']=ref(wrong_review);dump(os.path.join(run,'reopen-review-substitution.json'),package)
+package=json.loads(json.dumps(base));package['continuation']['remediation_consumption_identity']=ref(base['continuation']['remediation_package']['path']);dump(os.path.join(run,'reopen-consumption-substitution.json'),package)
+package=json.loads(json.dumps(base));package['site']['site_id']='other';dump(os.path.join(run,'reopen-cross-site.json'),package)
+package=json.loads(json.dumps(base));package['operation_id']='c'*32;dump(os.path.join(run,'reopen-duplicate-operation.json'),package)
+PY
+for case in failed-execution partial-dispatch wrong-dispatch-count audit-package-mismatch conflicting-rollback current-root-present current-wrong-inode current-wrong-operation plan-target-mismatch registry-mismatch reservation-substitution review-substitution consumption-substitution cross-site duplicate-operation;do
+  expect_fail "$case" python3 "$MODEL" verify-package --package "$run/reopen-$case.json" --domain "$domain" --now-epoch "$now"
+done
+mkdir -m 700 "$run/reopen-consumed";printf '%s\n' "$reopen_sha" >"$run/reopen-consumed/package-sha256";chmod 600 "$run/reopen-consumed/package-sha256"
+expect_fail completed_reopen_cannot_reopen_again python3 "$MODEL" verify-package --package "$reopen" --domain "$domain" --now-epoch "$now"
+rm -rf "$run/reopen-consumed"
+printf '%s\n' "$reopen_sha" >"$run/consumed/reopen-completed";chmod 600 "$run/consumed/reopen-completed"
+expect_fail source_lineage_completed_reopen python3 "$MODEL" verify-package --package "$reopen" --domain "$domain" --now-epoch "$now"
+rm "$run/consumed/reopen-completed"
 bash "$CLOSURE" "$domain" >"$TMP/closure.out";grep -Fq 'CLEAN_WITH_HARDENING_REMAINING' "$TMP/closure.out"||fail closure_hardening;pass closure_semantics
+python3 - "$reopen" "$run/reopen-reused-operation.json" "$run/reopen-reused-marker.json" <<'PY'
+import json,sys
+source,reused_operation,reused_marker=sys.argv[1:];value=json.load(open(source));value['operation_id']='a'*32;open(reused_operation,'w').write(json.dumps(value,sort_keys=True,separators=(',',':'))+'\n');value=json.load(open(source));value['one_shot']['consumption_marker']=value['continuation']['remediation_package']['path'].rsplit('/',1)[0]+'/consumed';open(reused_marker,'w').write(json.dumps(value,sort_keys=True,separators=(',',':'))+'\n')
+PY
+expect_fail reopen_reuses_source_operation python3 "$MODEL" verify-package --package "$run/reopen-reused-operation.json" --domain "$domain" --now-epoch "$now"
+expect_fail reopen_reuses_source_marker python3 "$MODEL" verify-package --package "$run/reopen-reused-marker.json" --domain "$domain" --now-epoch "$now"
 /bin/bash --version >/dev/null 2>&1||true;/bin/bash -n "$CLI" "$CLOSURE";pass bash_3_2_syntax_contract
 
 variant(){ local name="$1" code="$2";python3 - "$package" "$run/$name.json" "$code" <<'PY'
-import json,sys
-src,out,code=sys.argv[1:];v=json.load(open(src));exec(code);open(out,'w').write(json.dumps(v,sort_keys=True,separators=(',',':'))+'\n')
+import json,os,sys
+src,out,code=sys.argv[1:];v=json.load(open(src));v['one_shot']['consumption_marker']=os.path.join(os.path.dirname(out),'variant-consumed');exec(code);open(out,'w').write(json.dumps(v,sort_keys=True,separators=(',',':'))+'\n')
 PY
 }
 variant wrong-domain "v['domain']='other.test'";expect_fail wrong_site python3 "$MODEL" verify-package --package "$run/wrong-domain.json" --domain "$domain" --now-epoch "$now"
@@ -277,14 +356,14 @@ import json,sys
 v=json.load(open(sys.argv[1]));v['continuation']=None;open(sys.argv[2],'w').write(json.dumps(v,sort_keys=True,separators=(',',':'))+'\n')
 PY
 expect_fail reopen_without_remediation python3 "$MODEL" verify-package --package "$run/reopen-no-continuation.json" --domain "$domain" --now-epoch "$now"
-python3 - "$postcheck" "$run/postcheck-recurrence.json" "$reopen" "$run/reopen-recurrence.json" <<'PY'
-import hashlib,json,sys
-source_postcheck,bad_postcheck,source_reopen,bad_reopen=sys.argv[1:];p=json.load(open(source_postcheck));p['recurrence']=True;open(bad_postcheck,'w').write(json.dumps(p,sort_keys=True,separators=(',',':'))+'\n');v=json.load(open(source_reopen));v['continuation']['execution_postcheck']={'path':bad_postcheck,'sha256':hashlib.sha256(open(bad_postcheck,'rb').read()).hexdigest()};open(bad_reopen,'w').write(json.dumps(v,sort_keys=True,separators=(',',':'))+'\n')
+python3 - "$reopen" "$run/reopen-recurrence.json" <<'PY'
+import json,sys
+source,out=sys.argv[1:];value=json.load(open(source));value['continuation']['execution_postcheck']={'path':'/tmp/not-allowed','sha256':'0'*64};open(out,'w').write(json.dumps(value,sort_keys=True,separators=(',',':'))+'\n')
 PY
 expect_fail reopen_after_recurrence python3 "$MODEL" verify-package --package "$run/reopen-recurrence.json" --domain "$domain" --now-epoch "$now"
 expect_fail expired python3 "$MODEL" verify-package --package "$package" --domain "$domain" --now-epoch "$((now+7200))"
-expect_fail current_dispatch_missing_marker python3 "$MODEL" verify-current-dispatch --package "$package" --review "$review" --domain "$domain" --package-sha256 "$package_sha"
-mkdir -m 700 "$run/consumed";printf '%s\n' "$package_sha" >"$run/consumed/package-sha256";chmod 600 "$run/consumed/package-sha256"
+variant dispatch_missing_marker "pass";make_review "$run/dispatch_missing_marker.json" "$run/dispatch-missing-review.json"
+expect_fail current_dispatch_missing_marker python3 "$MODEL" verify-current-dispatch --package "$run/dispatch_missing_marker.json" --review "$run/dispatch-missing-review.json" --domain "$domain" --package-sha256 "$(recovery_sha256_file "$run/dispatch_missing_marker.json")"
 python3 "$MODEL" verify-current-dispatch --package "$package" --review "$review" --domain "$domain" --package-sha256 "$package_sha" >/dev/null || fail current_dispatch_exact_marker
 pass current_dispatch_exact_marker
 expect_fail one_shot_replay python3 "$MODEL" verify-package --package "$package" --domain "$domain" --now-epoch "$now"
@@ -296,7 +375,6 @@ mv "$run/consumed/package-sha256" "$run/consumed/package-sha256.real";ln -s pack
 expect_fail current_dispatch_symlink_identity python3 "$MODEL" verify-current-dispatch --package "$package" --review "$review" --domain "$domain" --package-sha256 "$package_sha"
 rm "$run/consumed/package-sha256";mv "$run/consumed/package-sha256.real" "$run/consumed/package-sha256"
 expect_fail current_dispatch_wrong_review python3 "$MODEL" verify-current-dispatch --package "$package" --review "$run/hmac-only-review.json" --domain "$domain" --package-sha256 "$package_sha"
-rm -rf "$run/consumed"
 printf tamper >>"$run/incident.json";expect_fail evidence_tamper bash "$CLI" "$domain"
 printf '{"tool":"synthetic","schema":1,"domain":"%s","root":"/home/user_42/app_42","name":"incident"}\n' "$domain" >"$run/incident.json";sign "$run/incident.json"
 pass forensic_dependency_integrity
@@ -340,8 +418,7 @@ pass closure_all_statuses
 # read-only closure is evaluated.  The fresh closure binds the immutable
 # historical operation; it must never turn that operation into replay authority.
 history_now="$((now+7200))"
-mkdir -m 700 "$run/consumed" "$run/historical-reopen-consumed"
-printf '%s\n' "$package_sha" >"$run/consumed/package-sha256";chmod 600 "$run/consumed/package-sha256"
+mkdir -m 700 "$run/historical-reopen-consumed"
 historical_reopen="$run/historical-reopen-package.json"
 python3 - "$historical_reopen" "$domain" "$package_sha" "$run" <<'PY'
 import json,os,sys
