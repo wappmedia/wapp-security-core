@@ -1,6 +1,6 @@
 # Native exact-file quarantine
 
-Public Core v1.1.8 supplies a customer-neutral Linux x86_64 backend for the
+Public Core v1.1.9 supplies a customer-neutral Linux x86_64 backend for the
 `QUARANTINE_EXACT_FILE` primitive. The backend is capability, not authority.
 It can run only from a private, independently reviewed emergency package bound
 to a signed registry and an explicit human live-GO.
