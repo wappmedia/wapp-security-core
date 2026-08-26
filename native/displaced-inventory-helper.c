@@ -46,8 +46,8 @@ enum {
     MAX_RELATIVE_BYTES = 4096,
     MAX_SECONDS = 900,
     IO_CHUNK = 1024 * 1024,
-    /* Two hex-encoded 4096-byte paths plus fixed metadata fit below 32768. */
-    DIAGNOSTIC_LINE_CAP = 32768,
+    /* Relative + absolute + symlink-target hex and fixed metadata stay bounded. */
+    DIAGNOSTIC_LINE_CAP = MAX_RELATIVE_BYTES * 9 + 4096,
 };
 static const uint64_t MAX_FILE_BYTES = 1024ULL * 1024ULL * 1024ULL;
 static const uint64_t MAX_TOTAL_BYTES = 32ULL * 1024ULL * 1024ULL * 1024ULL;

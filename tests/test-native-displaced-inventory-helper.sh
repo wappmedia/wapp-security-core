@@ -262,6 +262,20 @@ assert 'file_bytes>MAX_TOTAL_BYTES-s->hashed_bytes' in source
 assert 's->hashed_bytes+file_bytes>MAX_TOTAL_BYTES' not in source
 assert 'n>=ENTRY_CAP-s->entries' not in source
 assert 'if(n>=ENTRY_CAP)' in source
+# A valid bounded ENTRY may simultaneously carry the maximum relative path,
+# the root+relative absolute path, and a maximum symlink target.  Prove the
+# compact cursor's fixed record covers that complete contract surface and
+# that the regression would have exceeded the superseded 32768-byte bound.
+limit=4096
+relative_hex=(b'r'*limit).hex()
+root=b'/' + b'/'.join([b'x'*63]*64)
+assert len(root)<=limit
+absolute_hex=(root+b'/'+b'r'*limit).hex()
+target_hex=(b't'*limit).hex()
+maximum='\t'.join(['ENTRY',relative_hex,absolute_hex,'SYMLINK',str(2**63-1),'0777',str(2**32-1),str(2**32-1),str(2**63-1),str(2**63-1),str(2**64-1),str(2**64-1),str(2**64-1),target_hex,'f'*64,'1'])
+assert len(maximum)>32768
+assert len(maximum)<limit*9+4096
+assert 'DIAGNOSTIC_LINE_CAP = MAX_RELATIVE_BYTES * 9 + 4096' in source
 PY
 
 # Edenhorn-scale diagnostic regression: keep the same 100,001-file/9 GiB
