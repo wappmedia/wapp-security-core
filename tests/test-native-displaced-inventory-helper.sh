@@ -198,18 +198,24 @@ run_inventory >"$TMP/post-drift-stable.tsv"
 
 # Capacity regression: one bounded fixture simultaneously crosses the former
 # 100,000-file and 8 GiB aggregate ceilings without weakening any per-file,
-# output, memory or wall-clock guardrail. Sparse files keep fixture storage
-# bounded while the helper still reads and hashes every logical byte twice.
+# output, memory or wall-clock guardrail. Allocate and sync the large fixture
+# files before capture so the Linux regression proves hashing capacity without
+# depending on runner-specific sparse-extent metadata transitions.
 CAPACITY_ROOT="$TMP/provider-neutral/capacity-root"
 mkdir -p "$CAPACITY_ROOT"
 /usr/bin/python3 - "$CAPACITY_ROOT" <<'PY'
 import os, pathlib, sys
 root=pathlib.Path(sys.argv[1])
-for index in range(100001):
+for index in range(99992):
     fd=os.open(root/f'e{index:06d}',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600);os.close(fd)
 for index in range(9):
     fd=os.open(root/f'large-{index}',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
-    os.ftruncate(fd,1024*1024*1024);os.close(fd)
+    os.posix_fallocate(fd,0,1024*1024*1024);os.fsync(fd);os.close(fd)
+dirfd=os.open(root,os.O_RDONLY|os.O_DIRECTORY);os.fsync(dirfd);os.close(dirfd)
+items=list(root.iterdir());stats=[item.stat(follow_symlinks=False) for item in items]
+assert len(items)==100001 and sum(item.st_size for item in stats)==9*1024*1024*1024
+assert all(item.st_nlink==1 for item in stats)
+assert all(item.st_blocks>0 for item in stats if item.st_size)
 PY
 /bin/bash "$TMP/probe" "$CAPACITY_ROOT" "$NONCE" "$BINARY_SHA" "$BINARY_BYTES" inventory '' >"$TMP/capacity.tsv"
 /usr/bin/python3 - "$TMP/capacity.tsv" "$SOURCE" <<'PY'
@@ -219,7 +225,8 @@ assert lines[0].startswith('CAPTURE_NONCE\t') and payload==sorted(set(payload))
 summary=[line.split('\t') for line in payload if line.startswith('SUMMARY\t')]
 assert len(summary)==1
 s=summary[0]
-assert s[1:10]==['100011','1','100010','100010',str(9*1024*1024*1024),'0','0','0','true']
+expected=['100002','1','100001','100001',str(9*1024*1024*1024),'0','0','0','true']
+assert s[1:10]==expected,(s[1:10],expected)
 assert s[11:]==['200000','50000','150000','1073741824','34359738368','64','900','4096','125829120']
 entries=[line for line in payload if line.startswith('ENTRY\t')]
 h=hashlib.sha256()
