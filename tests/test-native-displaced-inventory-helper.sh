@@ -196,6 +196,63 @@ PY
 expect_fail stable_diagnostic /bin/bash "$TMP/probe" "$TEST_ROOT" "$NONCE" "$BINARY_SHA" "$BINARY_BYTES" diagnostic ''
 run_inventory >"$TMP/post-drift-stable.tsv"
 
+# Capacity regression: one bounded fixture simultaneously crosses the former
+# 100,000-file and 8 GiB aggregate ceilings without weakening any per-file,
+# output, memory or wall-clock guardrail. Sparse files keep fixture storage
+# bounded while the helper still reads and hashes every logical byte twice.
+CAPACITY_ROOT="$TMP/provider-neutral/capacity-root"
+mkdir -p "$CAPACITY_ROOT"
+/usr/bin/python3 - "$CAPACITY_ROOT" <<'PY'
+import os, pathlib, sys
+root=pathlib.Path(sys.argv[1])
+for index in range(100001):
+    fd=os.open(root/f'e{index:06d}',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600);os.close(fd)
+for index in range(9):
+    fd=os.open(root/f'large-{index}',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+    os.ftruncate(fd,1024*1024*1024);os.close(fd)
+PY
+/bin/bash "$TMP/probe" "$CAPACITY_ROOT" "$NONCE" "$BINARY_SHA" "$BINARY_BYTES" inventory '' >"$TMP/capacity.tsv"
+/usr/bin/python3 - "$TMP/capacity.tsv" "$SOURCE" <<'PY'
+import hashlib,pathlib,sys
+lines=pathlib.Path(sys.argv[1]).read_text(encoding='ascii').splitlines();payload=lines[1:]
+assert lines[0].startswith('CAPTURE_NONCE\t') and payload==sorted(set(payload))
+summary=[line.split('\t') for line in payload if line.startswith('SUMMARY\t')]
+assert len(summary)==1
+s=summary[0]
+assert s[1:10]==['100011','1','100010','100010',str(9*1024*1024*1024),'0','0','0','true']
+assert s[11:]==['200000','50000','150000','1073741824','34359738368','64','900','4096','125829120']
+entries=[line for line in payload if line.startswith('ENTRY\t')]
+h=hashlib.sha256()
+for line in entries:h.update(line.encode()+b'\n')
+assert h.hexdigest()==s[10]
+source=pathlib.Path(sys.argv[2]).read_text(encoding='utf-8')
+assert 'file_bytes>MAX_TOTAL_BYTES-s->hashed_bytes' in source
+assert 's->hashed_bytes+file_bytes>MAX_TOTAL_BYTES' not in source
+PY
+rm -rf "$CAPACITY_ROOT"
+
+# Genuine bounded-resource failures remain incomplete/fail-closed. The helper
+# must also surface output-device exhaustion instead of returning success.
+truncate -s 1073741825 "$TEST_ROOT/over-file-cap.bin"
+run_inventory >"$TMP/over-file-cap.tsv"
+grep -Fq $'UNRESOLVED\tFILE_BYTE_CAP\t' "$TMP/over-file-cap.tsv"||fail file_byte_cap_missing
+/usr/bin/python3 - "$TMP/over-file-cap.tsv" <<'PY'
+import pathlib,sys
+s=[x.split('\t') for x in pathlib.Path(sys.argv[1]).read_text().splitlines() if x.startswith('SUMMARY\t')]
+assert len(s)==1 and s[0][9]=='false' and int(s[0][8])>=1
+PY
+rm "$TEST_ROOT/over-file-cap.bin"
+run_to_full(){ /bin/bash "$TMP/probe" "$TEST_ROOT" "$NONCE" "$BINARY_SHA" "$BINARY_BYTES" inventory '' >/dev/full; }
+expect_fail output_disk_exhaustion run_to_full
+run_under_tight_address_space(){
+  (
+    ulimit -v 131072
+    /bin/bash "$TMP/probe" "$TEST_ROOT" "$NONCE" "$BINARY_SHA" "$BINARY_BYTES" inventory ''
+  )
+}
+expect_fail address_space_exhaustion run_under_tight_address_space
+grep -Fq 'wapp-native-displaced-inventory: process limits unavailable' "$TMP/address_space_exhaustion.err"||fail address_space_exhaustion_not_fail_closed
+
 # A disposition-aware inventory keeps every path visible and accepts only the
 # exact bounded metadata behavior encoded by the already verified policy token.
 printf 'log-before\n' >"$TEST_ROOT/a-runtime.log";printf 'runtime-state\n' >"$TEST_ROOT/b-runtime.php"

@@ -41,14 +41,14 @@ int main(void) {
 enum {
     ENTRY_CAP = 200000,
     DIRECTORY_CAP = 50000,
-    FILE_CAP = 100000,
+    FILE_CAP = 150000,
     DEPTH_CAP = 64,
     MAX_RELATIVE_BYTES = 4096,
-    MAX_SECONDS = 300,
+    MAX_SECONDS = 900,
     IO_CHUNK = 1024 * 1024,
 };
 static const uint64_t MAX_FILE_BYTES = 1024ULL * 1024ULL * 1024ULL;
-static const uint64_t MAX_TOTAL_BYTES = 8ULL * 1024ULL * 1024ULL * 1024ULL;
+static const uint64_t MAX_TOTAL_BYTES = 32ULL * 1024ULL * 1024ULL * 1024ULL;
 static const size_t MAX_OUTPUT_BYTES = 120ULL * 1024ULL * 1024ULL;
 static const size_t MAX_ROLLBACK_BYTES = 16ULL * 1024ULL * 1024ULL;
 static const char *RUNTIME_MODE = "PRODUCTION_RELEASE_PINNED_NATIVE_LINUX_X86_64_MEMFD_V1";
@@ -143,7 +143,8 @@ static int names_equal(Bytes *a,size_t an,Bytes *b,size_t bn){if(an!=bn)return 0
 static int has_uploads_component(const unsigned char *rel,size_t rn){size_t start=0;for(size_t i=0;i<=rn;i++)if(i==rn||rel[i]=='/'){if(i-start==7&&!memcmp(rel+start,"uploads",7))return 1;start=i+1;}return 0;}
 static char *join_bytes(const unsigned char *a,size_t an,const unsigned char *b,size_t bn,int slash,size_t *outn){size_t n=an+(slash?1:0)+bn;unsigned char *p=xmalloc(n+1);memcpy(p,a,an);if(slash)p[an]='/';memcpy(p+an+slash,b,bn);p[n]=0;*outn=n;return (char*)p;}
 static char *hash_regular(Snapshot *s,int parent,const char *name,const unsigned char *rel,size_t rn,const struct stat *before){
-  if((uint64_t)before->st_size>MAX_FILE_BYTES){issue(s,"FILE_BYTE_CAP",rel,rn,"size");return strdup("-");}if(s->hashed_bytes+(uint64_t)before->st_size>MAX_TOTAL_BYTES){issue(s,"TOTAL_BYTE_CAP",rel,rn,"total");return strdup("-");}
+  uint64_t file_bytes=(uint64_t)before->st_size;
+  if(file_bytes>MAX_FILE_BYTES){issue(s,"FILE_BYTE_CAP",rel,rn,"size");return strdup("-");}if(s->hashed_bytes>MAX_TOTAL_BYTES||file_bytes>MAX_TOTAL_BYTES-s->hashed_bytes){issue(s,"TOTAL_BYTE_CAP",rel,rn,"total");return strdup("-");}
   int used=0,fd=open_component(parent,name,O_RDONLY|O_NOFOLLOW|O_NOATIME|O_CLOEXEC,&used);if(fd<0){issue(s,"FILE_OPEN_UNRESOLVED",rel,rn,"open");return strdup("-");}struct stat opened,after,pathst;if(fstat(fd,&opened)<0||!same_stat(&opened,before)){close(fd);issue(s,"FILE_IDENTITY_RACE",rel,rn,"open");return strdup("-");}
   Sha256 sh;sha_init(&sh);unsigned char *buf=xmalloc(IO_CHUNK);uint64_t count=0;for(;;){check_deadline(s);ssize_t n=read(fd,buf,IO_CHUNK);if(n<0){free(buf);close(fd);issue(s,"FILE_READ_UNRESOLVED",rel,rn,"read");return strdup("-");}if(!n)break;count+=(uint64_t)n;if(count>(uint64_t)before->st_size){free(buf);close(fd);issue(s,"FILE_GROWTH_RACE",rel,rn,"growth");return strdup("-");}sha_update(&sh,buf,(size_t)n);}free(buf);if(fstat(fd,&after)<0||fstatat(parent,name,&pathst,AT_SYMLINK_NOFOLLOW)<0||count!=(uint64_t)before->st_size||!same_stat(&opened,&after)||!same_stat(&after,&pathst)){close(fd);issue(s,"FILE_IDENTITY_RACE",rel,rn,"read");return strdup("-");}close(fd);unsigned char d[32];char *out=xmalloc(65);sha_final(&sh,d);hex32(d,out);s->hashed++;s->hashed_bytes+=count;return out;
 }
@@ -171,7 +172,7 @@ static char *snapshot(const char *root,const char *runtime_sha,const char *runti
   char *roothex=hex_bytes((unsigned char*)root,strlen(root));char ri[65];digest(runtime_identity,strlen(runtime_identity),ri);char *runtimehex=hex_bytes((unsigned char*)RUNTIME_PATH,strlen(RUNTIME_PATH));
   Lines all={0};lines_add(&all,fmt_alloc("ROOT\t%s\t%s\t%llu\t%llu\t%03o\t%u\t%u\t%llu\t%lld\t%lld",roothex,roothex,(unsigned long long)rb.st_dev,(unsigned long long)rb.st_ino,(unsigned)(rb.st_mode&07777),(unsigned)rb.st_uid,(unsigned)rb.st_gid,(unsigned long long)rb.st_nlink,ns_time(rb.st_mtim),ns_time(rb.st_ctim)));lines_add(&all,fmt_alloc("RUNTIME\t%s\t%s\t%s\t%s",RUNTIME_MODE,runtimehex,runtime_sha,ri));
   for(size_t i=0;i<s.rows.n;i++){lines_add(&all,s.rows.v[i]);s.rows.v[i]=NULL;}for(size_t i=0;i<s.issues.n;i++){lines_add(&all,s.issues.v[i]);s.issues.v[i]=NULL;}
-  lines_add(&all,fmt_alloc("SUMMARY\t%zu\t%zu\t%zu\t%zu\t%llu\t%zu\t%zu\t%zu\t%s\t%s\t200000\t50000\t100000\t1073741824\t8589934592\t64\t300\t4096\t125829120",s.entries,s.dirs_n,s.files,s.hashed,(unsigned long long)s.hashed_bytes,s.uploads,s.other,s.issues.n,(s.issues.n==0&&!s.stopped)?"true":"false",ih));qsort(all.v,all.n,sizeof(char*),cmpstr);
+  lines_add(&all,fmt_alloc("SUMMARY\t%zu\t%zu\t%zu\t%zu\t%llu\t%zu\t%zu\t%zu\t%s\t%s\t200000\t50000\t150000\t1073741824\t34359738368\t64\t900\t4096\t125829120",s.entries,s.dirs_n,s.files,s.hashed,(unsigned long long)s.hashed_bytes,s.uploads,s.other,s.issues.n,(s.issues.n==0&&!s.stopped)?"true":"false",ih));qsort(all.v,all.n,sizeof(char*),cmpstr);
   size_t total=0;for(size_t i=0;i<all.n;i++)total+=strlen(all.v[i])+1;if(total>MAX_OUTPUT_BYTES)die("final serialized output byte cap exceeded");char *out=xmalloc(total+1),*q=out;for(size_t i=0;i<all.n;i++){size_t n=strlen(all.v[i]);memcpy(q,all.v[i],n);q+=n;*q++='\n';}*q=0;
   free(roothex);free(runtimehex);lines_free(&all);lines_free(&s.rows);lines_free(&s.issues);free(s.dirs.v);return out;
 }
@@ -305,6 +306,8 @@ static char *diagnostic_delta(const char *first_text,const char *second_text,con
   free(runtime_identity_hex);lines_free(&deltas);lines_free(&issue_deltas);lines_free(&output);diagnostic_entries_free(&first);diagnostic_entries_free(&second);diagnostic_issues_free(&first_issues);diagnostic_issues_free(&second_issues);return serialized;
 }
 static int valid_sha(const char *s){if(strlen(s)!=64)return 0;for(int i=0;i<64;i++)if(!((s[i]>='0'&&s[i]<='9')||(s[i]>='a'&&s[i]<='f')))return 0;return 1;}
+static void emit_capture(const char *nonce,const char *payload){if(printf("CAPTURE_NONCE\t%s\n",nonce)<0||fputs(payload,stdout)==EOF||fflush(stdout)==EOF)die("output write failure");}
+static void emit_payload(const char *payload){if(fputs(payload,stdout)==EOF||fflush(stdout)==EOF)die("output write failure");}
 static int valid_root(const char *s){
   size_t n,components=0,start=1;
   if(!s||s[0]!='/'||(n=strlen(s))<2||n>MAX_RELATIVE_BYTES||s[n-1]=='/')return 0;
@@ -367,10 +370,10 @@ static char *selected_snapshot(const char *root,const char *relhex,const char *r
 int main(int argc,char **argv){
   if(argc==2&&!strcmp(argv[1],"--platform-probe")){puts("SUPPORTED:linux-x86_64");return 0;}
   apply_process_limits();if((argc!=7&&argc!=8)||!valid_root(argv[2])||!valid_nonce(argv[3])||!valid_sha(argv[4])||strlen(argv[5])>512)die("invalid bounded invocation");verify_self_fd(argv[6],argv[4]);
-  if(argc==7&&!strcmp(argv[1],"inventory")){char *first=snapshot(argv[2],argv[4],argv[5]);char *second=snapshot(argv[2],argv[4],argv[5]);if(strcmp(first,second))die("inventory drift between passes");printf("CAPTURE_NONCE\t%s\n%s",argv[3],first);free(first);free(second);return 0;}
-  if(argc==7&&!strcmp(argv[1],"diagnostic")){char *first=snapshot(argv[2],argv[4],argv[5]);char *second=snapshot(argv[2],argv[4],argv[5]);char *delta=diagnostic_delta(first,second,argv[3],argv[4],argv[5]);fputs(delta,stdout);free(delta);free(first);free(second);return 0;}
-  if(argc==8&&!strcmp(argv[1],"volatile-inventory")){char *first=snapshot(argv[2],argv[4],argv[5]);char *second=snapshot(argv[2],argv[4],argv[5]);char *inventory=volatile_inventory(argv[2],first,second,argv[3],argv[7]);fputs(inventory,stdout);free(inventory);free(first);free(second);return 0;}
-  if(argc==8&&!strcmp(argv[1],"rollback")){char *first=selected_snapshot(argv[2],argv[7],argv[4],argv[5]);char *second=selected_snapshot(argv[2],argv[7],argv[4],argv[5]);if(strcmp(first,second))die("selected target drift between passes");printf("CAPTURE_NONCE\t%s\n%s",argv[3],first);free(first);free(second);return 0;}
+  if(argc==7&&!strcmp(argv[1],"inventory")){char *first=snapshot(argv[2],argv[4],argv[5]);char *second=snapshot(argv[2],argv[4],argv[5]);if(strcmp(first,second))die("inventory drift between passes");emit_capture(argv[3],first);free(first);free(second);return 0;}
+  if(argc==7&&!strcmp(argv[1],"diagnostic")){char *first=snapshot(argv[2],argv[4],argv[5]);char *second=snapshot(argv[2],argv[4],argv[5]);char *delta=diagnostic_delta(first,second,argv[3],argv[4],argv[5]);emit_payload(delta);free(delta);free(first);free(second);return 0;}
+  if(argc==8&&!strcmp(argv[1],"volatile-inventory")){char *first=snapshot(argv[2],argv[4],argv[5]);char *second=snapshot(argv[2],argv[4],argv[5]);char *inventory=volatile_inventory(argv[2],first,second,argv[3],argv[7]);emit_payload(inventory);free(inventory);free(first);free(second);return 0;}
+  if(argc==8&&!strcmp(argv[1],"rollback")){char *first=selected_snapshot(argv[2],argv[7],argv[4],argv[5]);char *second=selected_snapshot(argv[2],argv[7],argv[4],argv[5]);if(strcmp(first,second))die("selected target drift between passes");emit_capture(argv[3],first);free(first);free(second);return 0;}
   die("unsupported bounded mode");return 20;
 }
 #endif
