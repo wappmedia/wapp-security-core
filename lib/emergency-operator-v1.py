@@ -62,6 +62,15 @@ REQUIRED_PRODUCT_COMPONENTS = {
     "libexec/wapp-native-ephemeral-memfd-launcher-linux-x86_64.b64.txt",
     "native/build-ephemeral-memfd-launcher.sh",
     "native/ephemeral-memfd-launcher.c",
+    "config/native-exact-file-quarantine.json",
+    "config/native-exact-file-quarantine-ephemeral-bootstrap.json",
+    "lib/native-exact-file-quarantine-ephemeral-loader.sh",
+    "libexec/wapp-native-exact-file-quarantine-linux-x86_64.b64.txt",
+    "libexec/wapp-native-exact-file-quarantine-ephemeral-memfd-launcher-linux-x86_64.b64.txt",
+    "native/build-exact-file-quarantine-helper.sh",
+    "native/build-exact-file-quarantine-ephemeral-memfd-launcher.sh",
+    "native/exact-file-quarantine-helper.c",
+    "native/exact-file-quarantine-ephemeral-memfd-launcher.c",
 }
 PRODUCT_PATHSPECS = (
     "VERSION", "wapp", "wapp-scan", "install.command", "update.command",
@@ -71,6 +80,8 @@ PRODUCT_PATHSPECS = (
     "config/aws-custody-production-policy.json.example",
     "config/reviewer-trust-anchors.json", "config/native-filesystem-helper.json",
     "config/native-ephemeral-bootstrap.json",
+    "config/native-exact-file-quarantine.json",
+    "config/native-exact-file-quarantine-ephemeral-bootstrap.json",
     "native/*.c", "native/*.sh", "libexec/*.txt",
 )
 
@@ -548,10 +559,13 @@ def verify_action(action: Any, index: int) -> tuple[int, str]:
     restores, automatic = verify_rollback(action["rollback"], f"{label}.rollback")
 
     if primitive in {"QUARANTINE_EXACT_FILE", "REPLACE_EXACT_FILE"}:
-        exact_keys(target, {"path", "parent_device", "parent_inode", "device", "inode", "mode"}, f"{label}.target")
+        exact_keys(target, {"path", "parent_device", "parent_inode", "device", "inode", "mode", "file_type"}, f"{label}.target")
         absolute(target["path"], f"{label}.target.path")
         for key in ("parent_device", "parent_inode", "device", "inode"):
-            string(target[key], f"{label}.target.{key}")
+            if not re.fullmatch(r"[1-9][0-9]*", string(target[key], f"{label}.target.{key}")):
+                fail(f"{label}.target.{key} invalid")
+        if target["file_type"] != "REGULAR":
+            fail(f"{label}.target.file_type invalid")
         if not re.fullmatch(r"0[0-7]{3}", string(target["mode"], f"{label}.target.mode")):
             fail(f"{label}.target.mode invalid")
         expected_stage = "EXECUTABLE" if primitive == "QUARANTINE_EXACT_FILE" else "CONFIG"
@@ -1221,6 +1235,13 @@ def verify_package(
     for index, action in enumerate(actions):
         if action["primitive"] in {"QUARANTINE_EXACT_FILE", "REPLACE_EXACT_FILE"} and not action["target"]["path"].startswith(site["root"] + "/"):
             fail(f"actions[{index}] target outside serving root")
+    quarantine_actions = [action for action in actions if action["primitive"] == "QUARANTINE_EXACT_FILE"]
+    quarantine_paths = [action["target"]["path"] for action in quarantine_actions]
+    quarantine_objects = [(action["target"]["device"], action["target"]["inode"]) for action in quarantine_actions]
+    if quarantine_paths != sorted(quarantine_paths, key=lambda item: item.encode("utf-8")) or len(set(quarantine_paths)) != len(quarantine_paths):
+        fail("quarantine targets must be unique canonical lexical byte order")
+    if len(set(quarantine_objects)) != len(quarantine_objects):
+        fail("quarantine targets contain duplicate physical object")
     if phase == "REOPEN":
         if value["contract"] != "HUMAN_OPERATOR_EMERGENCY_SELF_ISOLATED" or len(actions) != 1 or actions[0]["primitive"] != "REOPEN_ATOMIC_DOCROOT" or actions[0]["target"]["canonical_root"] != site["root"]:
             fail("reopen package must contain exactly one bound atomic docroot reopen")

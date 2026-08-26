@@ -23,3 +23,12 @@ native/build-ephemeral-memfd-launcher.sh
 lib/native-displaced-inventory-ephemeral-loader.sh
 libexec/wapp-native-ephemeral-memfd-launcher-linux-x86_64.b64.txt
 config/native-ephemeral-bootstrap.json
+native/exact-file-quarantine-helper.c
+native/build-exact-file-quarantine-helper.sh
+libexec/wapp-native-exact-file-quarantine-linux-x86_64.b64.txt
+config/native-exact-file-quarantine.json
+native/exact-file-quarantine-ephemeral-memfd-launcher.c
+native/build-exact-file-quarantine-ephemeral-memfd-launcher.sh
+lib/native-exact-file-quarantine-ephemeral-loader.sh
+libexec/wapp-native-exact-file-quarantine-ephemeral-memfd-launcher-linux-x86_64.b64.txt
+config/native-exact-file-quarantine-ephemeral-bootstrap.json

@@ -31,6 +31,12 @@ verified file replacement, sparse `active_plugins` member removal, exact option
 removal, credential-neutral identity quarantine, atomic reopen, recurrence
 failure and closure evaluation.
 
+Version 1.1.8 adds a bounded native Linux backend for deterministic exact-file
+quarantine and exact rollback on hosts without Python. It remains
+non-authorizing and is usable only through the reviewed private emergency
+package/registry/human-GO chain. See
+[Native exact-file quarantine](docs/NATIVE-EXACT-FILE-QUARANTINE.md).
+
 ## Trust boundary
 
 This repository contains only engine code, schemas expressed by the validator,

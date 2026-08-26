@@ -56,6 +56,10 @@ must re-isolate on a failed post-open check.
 Executable targets precede config, database and identity stages. Every action
 binds exact before/after state and a signed rollback artifact. Session tokens,
 passwords and credential values are never accepted in the identity contract.
+File quarantine actions additionally require regular-file type, unique physical
+identity and canonical lexical path ordering. The native backend owns the
+grouped bounded transaction, exact compensation and rollback semantics; the
+public validator never creates mutation authority by itself.
 
 ## Isolation and failure behavior
 
