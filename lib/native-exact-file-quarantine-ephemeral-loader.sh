@@ -51,4 +51,5 @@ WAPP_EXACT_FILE_HELPER_BASE64_V1
 "$RM" -- "$launcher"||fail 'launcher cleanup failed';[[ ! -e "$launcher"&&! -L "$launcher" ]]||fail 'launcher cleanup absence failed'
 "$RMDIR" -- "$stage"||fail 'staging cleanup failed';[[ ! -e "$stage"&&! -L "$stage" ]]||fail 'staging cleanup absence failed'
 created=false;trap - EXIT
-printf 'EXACT_FILE_EPHEMERAL_RUNTIME_AUDIT_V1\t%s\t%s\t%s\t%s\t%s\tCLEANUP_VERIFIED\n' "$operation" "$LAUNCHER_SHA" "$launcher_meta" "$HELPER_SHA" "$(printf %s "$runtime"|hash_text)"
+runtime_sha="$(printf %s "$runtime"|hash_text)";[[ "$runtime_sha" =~ ^[a-f0-9]{64}$ ]]||fail 'runtime identity hash failed'
+printf 'EXACT_FILE_EPHEMERAL_RUNTIME_AUDIT_V1\t%s\t%s\t%s\t%s\t%s\tCLEANUP_VERIFIED\n' "$operation" "$LAUNCHER_SHA" "$launcher_meta" "$HELPER_SHA" "$runtime_sha"

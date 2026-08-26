@@ -13,5 +13,7 @@ for needle in ['apply','observe-quarantined','rollback','observe-original','F_AD
  assert needle in s
 for needle in ['__WAPP_EXACT_FILE_LAUNCHER_BASE64_PAYLOAD__','__WAPP_EXACT_FILE_HELPER_BASE64_PAYLOAD__','SAME_PRINCIPAL_TOCTOU_RISK_REQUIRES_LIVE_GO','CLEANUP_VERIFIED']:
  assert needle in l
+assert 'runtime_sha="$(printf %s "$runtime"|hash_text)"' in l
+assert '"$(printf %s "$runtime"|hash_text)"' not in l.split("printf 'EXACT_FILE_EPHEMERAL_RUNTIME_AUDIT_V1",1)[-1]
 PY
 printf 'PASS: exact-file ephemeral mutation runtime is release-pinned, non-authorizing and risk-gated\n'

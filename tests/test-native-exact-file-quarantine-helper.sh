@@ -108,8 +108,8 @@ template,launcher,helper,out=map(pathlib.Path,sys.argv[1:]);value=template.read_
 PY
 chmod 700 "$TMP/loader";prepare_case shipped;shipop=c123456789abcdef0123456789abcdef
 ship_out="$("$TMP/loader" "$CASE/home/site" "$shipop" "$RD" "$RI" "$MS" "$MH" "$PS" "$PH" 0 0 apply)";grep -Fq 'EXACT_FILE_EPHEMERAL_RUNTIME_AUDIT_V1' <<<"$ship_out"||fail shipped_loader_audit;QD="$(awk -F '\t' '$2=="QUARANTINED_EXACT"{print $5}' <<<"$ship_out")";QI="$(awk -F '\t' '$2=="QUARANTINED_EXACT"{print $6}' <<<"$ship_out")";[[ "$QD" =~ ^[0-9]+$&&"$QI" =~ ^[0-9]+$ ]]||fail shipped_receipt_identity
-"$TMP/loader" "$CASE/home/site" "$shipop" "$RD" "$RI" "$MS" "$MH" "$PS" "$PH" "$QD" "$QI" observe-quarantined |grep -Fq $'QUARANTINED_EXACT\t2'
-"$TMP/loader" "$CASE/home/site" "$shipop" "$RD" "$RI" "$MS" "$MH" "$PS" "$PH" "$QD" "$QI" rollback |grep -Fq $'ORIGINAL_EXACT\t2';[[ ! -e "$CASE/home/.wapp-security-exact-file-launcher-$shipop" ]]||fail shipped_stage_cleanup
+ship_observed="$("$TMP/loader" "$CASE/home/site" "$shipop" "$RD" "$RI" "$MS" "$MH" "$PS" "$PH" "$QD" "$QI" observe-quarantined)";grep -Fq $'QUARANTINED_EXACT\t2' <<<"$ship_observed"||fail shipped_observe_receipt;grep -Fq 'EXACT_FILE_EPHEMERAL_RUNTIME_AUDIT_V1' <<<"$ship_observed"||fail shipped_observe_audit
+ship_rollback="$("$TMP/loader" "$CASE/home/site" "$shipop" "$RD" "$RI" "$MS" "$MH" "$PS" "$PH" "$QD" "$QI" rollback)";grep -Fq $'ORIGINAL_EXACT\t2' <<<"$ship_rollback"||fail shipped_rollback_receipt;grep -Fq 'EXACT_FILE_EPHEMERAL_RUNTIME_AUDIT_V1' <<<"$ship_rollback"||fail shipped_rollback_audit;[[ ! -e "$CASE/home/.wapp-security-exact-file-launcher-$shipop" ]]||fail shipped_stage_cleanup
 
 # A test-only build crashes exactly after the durable destination fsync.  The
 # released helper must reconcile both apply-side and rollback-side mixed state.
