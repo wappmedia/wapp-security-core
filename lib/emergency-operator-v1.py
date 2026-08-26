@@ -790,7 +790,6 @@ def verify_reopen_source_lineage(
 
     reservation_path = bound_file(continuation["reopen_reservation"], "continuation.reopen_reservation")
     source_marker = Path(remediation_value["one_shot"]["consumption_marker"])
-    if reservation_path != source_marker / "reopen-reservation.json": fail("reopen reservation path mismatch")
     completed_reopen = source_marker / "reopen-completed"
     if completed_reopen.exists() or completed_reopen.is_symlink():
         fail("source remediation lineage already has a completed reopen")
@@ -798,7 +797,16 @@ def verify_reopen_source_lineage(
     exact_keys(reservation, {"tool", "schema", "state", "domain", "root", "source_operation_id",
         "source_package_sha256", "reopen_operation_id", "created_at_epoch", "expires_at_epoch",
         "reopen_authority_sha256", "source_replay_allowed", "authority"}, "reopen reservation")
-    if (reservation["tool"] != "wapp-security-emergency-reopen-reservation" or reservation["schema"] != 1
+    reservation_schema = integer(reservation["schema"], "reopen reservation.schema", minimum=1)
+    if reservation_schema == 1:
+        expected_reservation_path = source_marker / "reopen-reservation.json"
+    elif reservation_schema == 2:
+        expected_reservation_path = source_marker / "reopen-reservations" / f"{reopen_operation}.json"
+    else:
+        fail("reopen reservation schema unsupported")
+    if reservation_path != expected_reservation_path:
+        fail("reopen reservation path mismatch")
+    if (reservation["tool"] != "wapp-security-emergency-reopen-reservation"
         or reservation["state"] != "RESERVED_FOR_DISTINCT_REOPEN" or reservation["domain"] != domain
         or reservation["root"] != site["root"] or reservation["source_operation_id"] != remediation["operation_id"]
         or reservation["source_package_sha256"] != remediation["package_sha256"]

@@ -152,8 +152,8 @@ sign "$registry"
 build_consumed_reopen_fixture(){
   local plan="$run/coherent-plan.json" audit="$run/coordinator-execution-audit.log"
   local observation="$run/current-isolated-observation.json" source_registry="$run/source-registry.json"
-  local reservation="$run/consumed/reopen-reservation.json"
-  mkdir -m 700 "$run/consumed"
+  local reservation="$run/consumed/reopen-reservations/$(printf 'b%.0s' {1..32}).json"
+  mkdir -m 700 "$run/consumed" "$run/consumed/reopen-reservations"
   printf '%s\n' "$package_sha" >"$run/consumed/package-sha256";chmod 600 "$run/consumed/package-sha256";sign "$run/consumed/package-sha256"
   python3 - "$package" "$review" "$run" "$plan" "$audit" "$observation" "$source_registry" "$reservation" "$postcheck" "$reopen" "$domain" "$now" <<'PY'
 import datetime,hashlib,json,os,sys
@@ -187,7 +187,7 @@ reopen['actions']=[{'order':1,'primitive':'REOPEN_ATOMIC_DOCROOT','stage':'REOPE
 reopen['continuation']={'remediation_package':ref(package),'remediation_review':ref(review),'remediation_registry':ref(registry_path),'remediation_consumption_identity':ref(os.path.join(run,'consumed/package-sha256')),'coherent_plan':ref(plan_path),'execution_audit':ref(audit_path),'execution_postcheck':ref(postcheck_path),'current_isolation':ref(observation_path),'reopen_reservation':{'path':reservation_path,'sha256':'0'*64},'isolation_identity_sha256':isolation}
 reopen['human_gate']['phrase_format']='ÅTERÖPPNA <DOMAIN> <PACKAGE_SHA256_12>';reopen['one_shot']['consumption_marker']=os.path.join(run,'reopen-consumed')
 committed=json.loads(json.dumps(reopen));del committed['continuation']['reopen_reservation'];authority_sha=hashlib.sha256(json.dumps(committed,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()
-reservation={'tool':'wapp-security-emergency-reopen-reservation','schema':1,'state':'RESERVED_FOR_DISTINCT_REOPEN','domain':domain,'root':source['site']['root'],'source_operation_id':source['operation_id'],'source_package_sha256':source_sha,'reopen_operation_id':reopen['operation_id'],'created_at_epoch':now,'expires_at_epoch':now+3600,'reopen_authority_sha256':authority_sha,'source_replay_allowed':False,'authority':False};dump(reservation_path,reservation)
+reservation={'tool':'wapp-security-emergency-reopen-reservation','schema':2,'state':'RESERVED_FOR_DISTINCT_REOPEN','domain':domain,'root':source['site']['root'],'source_operation_id':source['operation_id'],'source_package_sha256':source_sha,'reopen_operation_id':reopen['operation_id'],'created_at_epoch':now,'expires_at_epoch':now+3600,'reopen_authority_sha256':authority_sha,'source_replay_allowed':False,'authority':False};dump(reservation_path,reservation)
 reopen['continuation']['reopen_reservation']=ref(reservation_path);dump(reopen_path,reopen)
 PY
   for file in "$run"/dispatch-binding-*.json "$plan" "$audit" "$observation" "$source_registry" "$reservation" "$postcheck" "$reopen";do sign "$file";done
@@ -271,6 +271,25 @@ python3 "$MODEL" exec-launcher --launcher "$run/launcher" --sha256 "$(recovery_s
 build_consumed_reopen_fixture
 expect_fail consumed_remediation_replay python3 "$MODEL" verify-package --package "$package" --domain "$domain" --now-epoch "$now"
 [[ "$(python3 "$MODEL" verify-package --package "$reopen" --domain "$domain" --now-epoch "$now" | python3 -c 'import json,sys;print(json.load(sys.stdin)["human_phrase"])')" == "ÅTERÖPPNA $domain ${reopen_sha:0:12}" ]] || fail reopen_phrase;pass separate_reopen_contract
+legacy_reservation="$run/consumed/reopen-reservation.json";legacy_reopen="$run/reopen-legacy-reservation.json"
+python3 - "$reopen" "$legacy_reservation" "$legacy_reopen" <<'PY'
+import hashlib,json,sys
+source,reservation_path,output=sys.argv[1:]
+value=json.load(open(source));current=value['continuation']['reopen_reservation']['path'];reservation=json.load(open(current));reservation['schema']=1
+open(reservation_path,'w').write(json.dumps(reservation,sort_keys=True,separators=(',',':'))+'\n')
+value['continuation']['reopen_reservation']={'path':reservation_path,'sha256':hashlib.sha256(open(reservation_path,'rb').read()).hexdigest()}
+open(output,'w').write(json.dumps(value,sort_keys=True,separators=(',',':'))+'\n')
+PY
+sign "$legacy_reservation";sign "$legacy_reopen"
+python3 "$MODEL" verify-package --package "$legacy_reopen" --domain "$domain" --now-epoch "$now" >/dev/null||fail legacy_reopen_reservation_schema1
+pass legacy_reopen_reservation_schema1
+wrong_reservation="$run/consumed/reopen-reservations/$(printf 'c%.0s' {1..32}).json";wrong_reopen="$run/reopen-wrong-versioned-reservation-path.json"
+cp "$run/consumed/reopen-reservations/$(printf 'b%.0s' {1..32}).json" "$wrong_reservation";sign "$wrong_reservation"
+python3 - "$reopen" "$wrong_reservation" "$wrong_reopen" <<'PY'
+import hashlib,json,sys
+source,reservation_path,output=sys.argv[1:];value=json.load(open(source));value['continuation']['reopen_reservation']={'path':reservation_path,'sha256':hashlib.sha256(open(reservation_path,'rb').read()).hexdigest()};open(output,'w').write(json.dumps(value,sort_keys=True,separators=(',',':'))+'\n')
+PY
+sign "$wrong_reopen";expect_fail versioned_reopen_reservation_wrong_operation_path python3 "$MODEL" verify-package --package "$wrong_reopen" --domain "$domain" --now-epoch "$now"
 mv "$run/consumed" "$run/consumed.hidden";expect_fail reopen_unconsumed_source python3 "$MODEL" verify-package --package "$reopen" --domain "$domain" --now-epoch "$now";mv "$run/consumed.hidden" "$run/consumed"
 mv "$run/coordinator-execution-audit.log" "$run/coordinator-execution-audit.log.hidden";expect_fail reopen_consumed_without_audit python3 "$MODEL" verify-package --package "$reopen" --domain "$domain" --now-epoch "$now";mv "$run/coordinator-execution-audit.log.hidden" "$run/coordinator-execution-audit.log"
 mv "$postcheck" "$postcheck.hidden";expect_fail reopen_consumed_without_postcheck python3 "$MODEL" verify-package --package "$reopen" --domain "$domain" --now-epoch "$now";mv "$postcheck.hidden" "$postcheck"
