@@ -194,6 +194,8 @@ assert any(line.startswith('DRIFT_ISSUE\t') for line in lines)
 assert not any('before' in line or 'after' in line for line in lines)
 PY
 expect_fail stable_diagnostic /bin/bash "$TMP/probe" "$TEST_ROOT" "$NONCE" "$BINARY_SHA" "$BINARY_BYTES" diagnostic ''
+[[ ! -s "$TMP/stable_diagnostic.out" ]]||fail stable_diagnostic_emitted_partial_output
+grep -Fq 'diagnostic mode requires two-pass mismatch' "$TMP/stable_diagnostic.err"||fail stable_diagnostic_failure_changed
 
 # The ordinary inventory remains strictly closed-world. Real modification,
 # replacement, delete/create and symlink substitution during the two passes
@@ -261,6 +263,37 @@ assert 's->hashed_bytes+file_bytes>MAX_TOTAL_BYTES' not in source
 assert 'n>=ENTRY_CAP-s->entries' not in source
 assert 'if(n>=ENTRY_CAP)' in source
 PY
+
+# Edenhorn-scale diagnostic regression: keep the same 100,001-file/9 GiB
+# closed-world fixture, add one early-sorted bounded drift target, and prove
+# that the released 256 MiB process ceiling can explain the mismatch without
+# copying either complete snapshot or weakening ordinary inventory semantics.
+printf 'capacity-diagnostic-before\n' >"$CAPACITY_ROOT/a-diagnostic-drift"
+(
+  sleep 2
+  printf 'capacity-diagnostic-after\n' >"$CAPACITY_ROOT/a-diagnostic-drift"
+) & capacity_mutator=$!
+/bin/bash "$TMP/probe" "$CAPACITY_ROOT" "$NONCE" "$BINARY_SHA" "$BINARY_BYTES" diagnostic '' >"$TMP/capacity-diagnostic.tsv"
+wait "$capacity_mutator"
+/usr/bin/python3 - "$TMP/capacity-diagnostic.tsv" <<'PY'
+import pathlib,sys
+lines=pathlib.Path(sys.argv[1]).read_text(encoding='ascii').splitlines()
+header=[line.split('\t') for line in lines if line.startswith('DRIFT_DIAGNOSTIC\t')]
+deltas=[line.split('\t') for line in lines if line.startswith('DRIFT\t')]
+assert len(header)==1 and header[0][-2:]==['READ_ONLY','NON_AUTHORIZING']
+assert len(deltas)==1 and bytes.fromhex(deltas[0][1])==b'a-diagnostic-drift'
+assert deltas[0][2] in {'MODIFIED','REPLACED'}
+assert int(header[0][12])==1 and int(header[0][13])==0
+PY
+
+# A deliberately too-small inherited address-space budget remains fail-closed.
+run_capacity_diagnostic_under_tight_address_space(){
+  (
+    ulimit -v 32768
+    /bin/bash "$TMP/probe" "$CAPACITY_ROOT" "$NONCE" "$BINARY_SHA" "$BINARY_BYTES" diagnostic ''
+  )
+}
+expect_fail diagnostic_memory_exhaustion run_capacity_diagnostic_under_tight_address_space
 rm -rf "$CAPACITY_ROOT"
 
 # Genuine bounded-resource failures remain incomplete/fail-closed. The helper

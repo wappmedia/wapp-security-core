@@ -46,6 +46,8 @@ enum {
     MAX_RELATIVE_BYTES = 4096,
     MAX_SECONDS = 900,
     IO_CHUNK = 1024 * 1024,
+    /* Two hex-encoded 4096-byte paths plus fixed metadata fit below 32768. */
+    DIAGNOSTIC_LINE_CAP = 32768,
 };
 static const uint64_t MAX_FILE_BYTES = 1024ULL * 1024ULL * 1024ULL;
 static const uint64_t MAX_TOTAL_BYTES = 32ULL * 1024ULL * 1024ULL * 1024ULL;
@@ -88,6 +90,8 @@ typedef struct { char *storage; char *field[16]; } DiagnosticEntry;
 typedef struct { DiagnosticEntry *v; size_t n,cap; } DiagnosticEntries;
 typedef struct { char *key,*storage; char *field[4]; } DiagnosticIssue;
 typedef struct { DiagnosticIssue *v; size_t n,cap; } DiagnosticIssues;
+typedef struct { const char *cursor; char previous[DIAGNOSTIC_LINE_CAP]; size_t count; } DiagnosticCursor;
+typedef struct { char storage[DIAGNOSTIC_LINE_CAP]; char *field[16]; } DiagnosticRecord;
 typedef struct { char behavior; char *path; int observed; } VolatileRule;
 typedef struct { VolatileRule v[64]; size_t n; } VolatilePolicy;
 static int nibble(char c);
@@ -224,6 +228,51 @@ static void parse_diagnostic_snapshot(const char *snapshot_text,DiagnosticEntrie
   }
   free(copy);if(root_seen!=1||runtime_seen!=1||strcmp(root[0],"ROOT")||strcmp(runtime[0],"RUNTIME"))die("diagnostic snapshot binding missing");
 }
+static int diagnostic_line_next(const char **cursor,const char **line,size_t *length){
+  while(**cursor){
+    const char *start=*cursor,*end=strchr(start,'\n');size_t n=end?(size_t)(end-start):strlen(start);*cursor=end?end+1:start+n;
+    if(!n)continue;*line=start;*length=n;return 1;
+  }
+  return 0;
+}
+static int diagnostic_prefix(const char *line,size_t length,const char *prefix){size_t n=strlen(prefix);return length>=n&&!memcmp(line,prefix,n);}
+static void diagnostic_record_copy(DiagnosticRecord *record,const char *line,size_t length){
+  if(length>=sizeof record->storage)die("diagnostic line cap");memcpy(record->storage,line,length);record->storage[length]=0;memset(record->field,0,sizeof record->field);
+}
+static void parse_diagnostic_bindings(const char *snapshot_text,char root[11][8193],char runtime[5][1025]){
+  const char *cursor=snapshot_text,*line;size_t length;int root_seen=0,runtime_seen=0;DiagnosticRecord record;
+  while(diagnostic_line_next(&cursor,&line,&length)){
+    if(diagnostic_prefix(line,length,"ROOT\t")){
+      if(root_seen++)die("diagnostic duplicate root");diagnostic_record_copy(&record,line,length);if(split_tabs(record.storage,record.field,11)!=11)die("diagnostic root invalid");
+      for(size_t i=0;i<11;i++){if(strlen(record.field[i])>=8193)die("diagnostic root field cap");strcpy(root[i],record.field[i]);}
+    }else if(diagnostic_prefix(line,length,"RUNTIME\t")){
+      if(runtime_seen++)die("diagnostic duplicate runtime");diagnostic_record_copy(&record,line,length);if(split_tabs(record.storage,record.field,5)!=5)die("diagnostic runtime invalid");
+      for(size_t i=0;i<5;i++){if(strlen(record.field[i])>=1025)die("diagnostic runtime field cap");strcpy(runtime[i],record.field[i]);}
+    }
+  }
+  if(root_seen!=1||runtime_seen!=1||strcmp(root[0],"ROOT")||strcmp(runtime[0],"RUNTIME"))die("diagnostic snapshot binding missing");
+}
+static int diagnostic_entry_next(DiagnosticCursor *cursor,DiagnosticRecord *record){
+  const char *line;size_t length;
+  while(diagnostic_line_next(&cursor->cursor,&line,&length))if(diagnostic_prefix(line,length,"ENTRY\t")){
+    if(cursor->count>=ENTRY_CAP)die("diagnostic entry cap");diagnostic_record_copy(record,line,length);
+    if(split_tabs(record->storage,record->field,16)!=16||strcmp(record->field[0],"ENTRY")||!canonical_relhex(record->field[1]))die("diagnostic source entry invalid");
+    if(cursor->count&&strcmp(cursor->previous,record->field[1])>=0)die("diagnostic source ordering invalid");
+    if(strlen(record->field[1])>=sizeof cursor->previous)die("diagnostic entry path cap");strcpy(cursor->previous,record->field[1]);cursor->count++;return 1;
+  }
+  return 0;
+}
+static int diagnostic_issue_next(DiagnosticCursor *cursor,DiagnosticRecord *record){
+  const char *line;size_t length;
+  while(diagnostic_line_next(&cursor->cursor,&line,&length))if(diagnostic_prefix(line,length,"UNRESOLVED\t")){
+    if(cursor->count>=ENTRY_CAP)die("diagnostic issue cap");diagnostic_record_copy(record,line,length);
+    if(cursor->count&&strcmp(cursor->previous,record->storage)>=0)die("diagnostic issue ordering invalid");
+    if(strlen(record->storage)>=sizeof cursor->previous)die("diagnostic issue line cap");strcpy(cursor->previous,record->storage);
+    if(split_tabs(record->storage,record->field,4)!=4||strcmp(record->field[0],"UNRESOLVED")||!canonical_relhex(record->field[2])||!valid_sha(record->field[3]))die("diagnostic source issue invalid");
+    cursor->count++;return 1;
+  }
+  return 0;
+}
 static const char *diagnostic_change(const DiagnosticEntry *first,const DiagnosticEntry *second){
   if(!first)return "CREATED";if(!second)return "DELETED";
   if(strcmp(first->field[3],second->field[3])||strcmp(first->field[10],second->field[10])||strcmp(first->field[11],second->field[11]))return "REPLACED";
@@ -279,23 +328,22 @@ static char *volatile_inventory(const char *root,const char *first_text,const ch
 }
 static char *diagnostic_delta(const char *first_text,const char *second_text,const char *nonce,const char *helper_sha,const char *runtime_identity){
   if(!strcmp(first_text,second_text))die("diagnostic mode requires two-pass mismatch");
-  DiagnosticEntries first={0},second={0};DiagnosticIssues first_issues={0},second_issues={0};char root1[11][8193]={{0}},root2[11][8193]={{0}},runtime1[5][1025]={{0}},runtime2[5][1025]={{0}};
-  parse_diagnostic_snapshot(first_text,&first,&first_issues,root1,runtime1);parse_diagnostic_snapshot(second_text,&second,&second_issues,root2,runtime2);
+  char root1[11][8193]={{0}},root2[11][8193]={{0}},runtime1[5][1025]={{0}},runtime2[5][1025]={{0}};
+  parse_diagnostic_bindings(first_text,root1,runtime1);parse_diagnostic_bindings(second_text,root2,runtime2);
   if(strcmp(root1[1],root2[1])||strcmp(runtime1[1],runtime2[1])||strcmp(runtime1[2],runtime2[2])||strcmp(runtime1[3],helper_sha)||strcmp(runtime2[3],helper_sha)||strcmp(runtime1[4],runtime2[4]))die("diagnostic snapshot identity mismatch");
   char first_sha[65],second_sha[65];digest(first_text,strlen(first_text),first_sha);digest(second_text,strlen(second_text),second_sha);
-  Lines deltas={0};size_t i=0,j=0;
-  while(i<first.n||j<second.n){
-    DiagnosticEntry *a=i<first.n?&first.v[i]:NULL,*b=j<second.n?&second.v[j]:NULL;int order=a&&b?strcmp(a->field[1],b->field[1]):(a?-1:1);
-    if(order==0&&diagnostic_entry_equal(a,b)){i++;j++;continue;}
-    DiagnosticEntry *left=order<=0?a:NULL,*right=order>=0?b:NULL;const char *path=left?left->field[1]:right->field[1];
+  Lines deltas={0};DiagnosticCursor first_entries={.cursor=first_text},second_entries={.cursor=second_text};DiagnosticRecord first_entry,second_entry;int have_first=diagnostic_entry_next(&first_entries,&first_entry),have_second=diagnostic_entry_next(&second_entries,&second_entry);
+  while(have_first||have_second){
+    DiagnosticEntry a={0},b={0};if(have_first){a.storage=first_entry.storage;memcpy(a.field,first_entry.field,sizeof a.field);}if(have_second){b.storage=second_entry.storage;memcpy(b.field,second_entry.field,sizeof b.field);}int order=have_first&&have_second?strcmp(a.field[1],b.field[1]):(have_first?-1:1);
+    if(order==0&&diagnostic_entry_equal(&a,&b)){have_first=diagnostic_entry_next(&first_entries,&first_entry);have_second=diagnostic_entry_next(&second_entries,&second_entry);continue;}
+    DiagnosticEntry *left=order<=0?&a:NULL,*right=order>=0?&b:NULL;const char *path=left?left->field[1]:right->field[1];
     lines_add(&deltas,fmt_alloc("DRIFT\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s",path,diagnostic_change(left,right),left?"true":"false",right?"true":"false",diagnostic_value(left,3),diagnostic_value(left,10),diagnostic_value(left,11),diagnostic_value(left,4),diagnostic_value(left,5),diagnostic_value(left,6),diagnostic_value(left,7),diagnostic_value(left,12),diagnostic_value(left,8),diagnostic_value(left,9),diagnostic_value(left,14),diagnostic_value(left,13),diagnostic_value(left,15),diagnostic_value(right,3),diagnostic_value(right,10),diagnostic_value(right,11),diagnostic_value(right,4),diagnostic_value(right,5),diagnostic_value(right,6),diagnostic_value(right,7),diagnostic_value(right,12),diagnostic_value(right,8),diagnostic_value(right,9),diagnostic_value(right,14),diagnostic_value(right,13),diagnostic_value(right,15)));
-    if(order<=0)i++;if(order>=0)j++;
+    if(order<=0)have_first=diagnostic_entry_next(&first_entries,&first_entry);if(order>=0)have_second=diagnostic_entry_next(&second_entries,&second_entry);
   }
-  Lines issue_deltas={0};i=0;j=0;
-  while(i<first_issues.n||j<second_issues.n){
-    DiagnosticIssue *a=i<first_issues.n?&first_issues.v[i]:NULL,*b=j<second_issues.n?&second_issues.v[j]:NULL;int order=a&&b?strcmp(a->key,b->key):(a?-1:1);
-    if(order==0){i++;j++;continue;}
-    DiagnosticIssue *issue=order<0?a:b;lines_add(&issue_deltas,fmt_alloc("DRIFT_ISSUE\t%s\t%s\t%s\t%s\t%s",issue->field[2],issue->field[1],issue->field[3],order<0?"true":"false",order>0?"true":"false"));if(order<0)i++;else j++;
+  Lines issue_deltas={0};DiagnosticCursor first_issues={.cursor=first_text},second_issues={.cursor=second_text};DiagnosticRecord first_issue,second_issue;have_first=diagnostic_issue_next(&first_issues,&first_issue);have_second=diagnostic_issue_next(&second_issues,&second_issue);
+  while(have_first||have_second){
+    int order=have_first&&have_second?strcmp(first_issues.previous,second_issues.previous):(have_first?-1:1);if(order==0){have_first=diagnostic_issue_next(&first_issues,&first_issue);have_second=diagnostic_issue_next(&second_issues,&second_issue);continue;}
+    DiagnosticRecord *issue=order<0?&first_issue:&second_issue;lines_add(&issue_deltas,fmt_alloc("DRIFT_ISSUE\t%s\t%s\t%s\t%s\t%s",issue->field[2],issue->field[1],issue->field[3],order<0?"true":"false",order>0?"true":"false"));if(order<0)have_first=diagnostic_issue_next(&first_issues,&first_issue);else have_second=diagnostic_issue_next(&second_issues,&second_issue);
   }
   if(deltas.n>ENTRY_CAP||issue_deltas.n>ENTRY_CAP||deltas.n+issue_deltas.n==0)die("diagnostic mismatch not fully explainable");
   char *runtime_identity_sha=runtime1[4],*runtime_identity_hex=hex_bytes((unsigned char*)runtime_identity,strlen(runtime_identity));Lines output={0};
@@ -305,7 +353,7 @@ static char *diagnostic_delta(const char *first_text,const char *second_text,con
   for(size_t k=0;k<issue_deltas.n;k++){lines_add(&output,issue_deltas.v[k]);issue_deltas.v[k]=NULL;}
   size_t total=1;for(size_t k=0;k<output.n;k++)total+=strlen(output.v[k])+1;if(total>MAX_OUTPUT_BYTES)die("diagnostic serialized output cap");char *serialized=xmalloc(total),*cursor=serialized;
   for(size_t k=0;k<output.n;k++){size_t n=strlen(output.v[k]);memcpy(cursor,output.v[k],n);cursor+=n;*cursor++='\n';}*cursor=0;
-  free(runtime_identity_hex);lines_free(&deltas);lines_free(&issue_deltas);lines_free(&output);diagnostic_entries_free(&first);diagnostic_entries_free(&second);diagnostic_issues_free(&first_issues);diagnostic_issues_free(&second_issues);return serialized;
+  free(runtime_identity_hex);lines_free(&deltas);lines_free(&issue_deltas);lines_free(&output);return serialized;
 }
 static int valid_sha(const char *s){if(strlen(s)!=64)return 0;for(int i=0;i<64;i++)if(!((s[i]>='0'&&s[i]<='9')||(s[i]>='a'&&s[i]<='f')))return 0;return 1;}
 static void emit_capture(const char *nonce,const char *payload){if(printf("CAPTURE_NONCE\t%s\n",nonce)<0||fputs(payload,stdout)==EOF||fflush(stdout)==EOF)die("output write failure");}
