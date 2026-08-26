@@ -160,6 +160,92 @@ def canonical_digest(value: Any) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def exact_file_manifests(actions: list[dict[str, Any]], orders: list[int], root: str) -> tuple[str, str]:
+    target_rows: list[str] = []
+    parent_rows: list[str] = []
+    for order in orders:
+        action = actions[order - 1]
+        if action["primitive"] != "QUARANTINE_EXACT_FILE":
+            fail("exact-file transaction contains non-quarantine action")
+        target = action["target"]
+        relative = target["path"][len(root) + 1:]
+        target_rows.append("\t".join((
+            relative.encode("utf-8").hex(), action["before"]["sha256"], str(action["before"]["bytes"]),
+            str(int(target["mode"], 8)), target["uid"], target["gid"], target["device"], target["inode"],
+        )))
+        parent_rows.append(f"{target['parent_device']}\t{target['parent_inode']}")
+    target_raw = ("\n".join(target_rows) + "\n").encode("ascii")
+    parent_raw = ("\n".join(parent_rows) + "\n").encode("ascii")
+    return hashlib.sha256(target_raw).hexdigest(), hashlib.sha256(parent_raw).hexdigest()
+
+
+def product_component_sha(package: dict[str, Any], component: str) -> str:
+    seal = load(Path(package["product"]["seal"]["path"]))
+    matches = [item for item in seal.get("components", []) if isinstance(item, dict) and item.get("path") == component]
+    if len(matches) != 1:
+        fail(f"product component binding missing: {component}")
+    return digest(matches[0].get("sha256"), f"product component {component}")
+
+
+def verify_exact_file_binding(path: Path, package: dict[str, Any], package_path: Path, orders: list[int]) -> dict[str, Any]:
+    value = load(path)
+    exact_keys(value, {
+        "tool", "schema", "state", "domain", "canonical_root", "operation_id", "package_sha256",
+        "action_orders", "target_count", "target_manifest_sha256", "parent_manifest_sha256",
+        "helper_artifact_sha256", "launcher_artifact_sha256", "loader_sha256", "authority",
+    }, "exact_file_binding")
+    target_sha, parent_sha = exact_file_manifests(package["actions"], orders, package["site"]["root"])
+    expected = {
+        "helper_artifact_sha256": product_component_sha(package, "libexec/wapp-native-exact-file-quarantine-linux-x86_64.b64.txt"),
+        "launcher_artifact_sha256": product_component_sha(package, "libexec/wapp-native-exact-file-quarantine-ephemeral-memfd-launcher-linux-x86_64.b64.txt"),
+        "loader_sha256": product_component_sha(package, "lib/native-exact-file-quarantine-ephemeral-loader.sh"),
+    }
+    if (value["tool"] != "wapp-security-bounded-exact-file-binding" or value["schema"] != 1
+        or value["state"] != "PREPARED_NO_MUTATION" or value["domain"] != package["domain"]
+        or value["canonical_root"] != package["site"]["root"] or value["operation_id"] != package["operation_id"]
+        or value["package_sha256"] != sha(package_path) or value["action_orders"] != orders
+        or value["target_count"] != len(orders) or value["target_manifest_sha256"] != target_sha
+        or value["parent_manifest_sha256"] != parent_sha or value["authority"] is not False
+        or any(value[key] != expected[key] for key in expected)):
+        fail("exact-file transaction binding mismatch")
+    return value
+
+
+def verify_exact_file_receipt(path: Path, package: dict[str, Any], package_path: Path, orders: list[int], isolated_root: str, postcheck_generated: int) -> None:
+    value = load(path)
+    exact_keys(value, {
+        "tool", "schema", "state", "domain", "canonical_root", "execution_root", "root_device", "root_inode",
+        "operation_id", "package_sha256", "action_orders", "target_count", "target_manifest_sha256",
+        "parent_manifest_sha256", "quarantine_device", "quarantine_inode", "helper_artifact_sha256", "launcher_artifact_sha256",
+        "loader_sha256", "runtime_identity_sha256", "source_paths_absent", "quarantine_objects_exact",
+        "target_cardinality_verified", "poststate_verified", "reconciliation_used", "isolation_remains",
+        "generated_at_epoch", "authority",
+    }, "exact_file_receipt")
+    target_sha, parent_sha = exact_file_manifests(package["actions"], orders, package["site"]["root"])
+    expected = {
+        "helper_artifact_sha256": product_component_sha(package, "libexec/wapp-native-exact-file-quarantine-linux-x86_64.b64.txt"),
+        "launcher_artifact_sha256": product_component_sha(package, "libexec/wapp-native-exact-file-quarantine-ephemeral-memfd-launcher-linux-x86_64.b64.txt"),
+        "loader_sha256": product_component_sha(package, "lib/native-exact-file-quarantine-ephemeral-loader.sh"),
+    }
+    if (value["tool"] != "wapp-security-bounded-exact-file-result" or value["schema"] != 1
+        or value["state"] != "QUARANTINED_EXACT" or value["domain"] != package["domain"]
+        or value["canonical_root"] != package["site"]["root"] or value["execution_root"] != isolated_root
+        or value["root_device"] != package["site"]["root_device"] or value["root_inode"] != package["site"]["root_inode"]
+        or value["operation_id"] != package["operation_id"] or value["package_sha256"] != sha(package_path)
+        or value["action_orders"] != orders or value["target_count"] != len(orders)
+        or value["target_manifest_sha256"] != target_sha or value["parent_manifest_sha256"] != parent_sha
+        or not re.fullmatch(r"[1-9][0-9]*", string(value["quarantine_device"], "exact_file_receipt.quarantine_device"))
+        or not re.fullmatch(r"[1-9][0-9]*", string(value["quarantine_inode"], "exact_file_receipt.quarantine_inode"))
+        or not HEX64.fullmatch(string(value["runtime_identity_sha256"], "exact_file_receipt.runtime_identity_sha256"))
+        or any(value[key] != expected[key] for key in expected)
+        or any(value[key] is not True for key in ("source_paths_absent", "quarantine_objects_exact", "target_cardinality_verified", "poststate_verified", "isolation_remains"))
+        or value["reconciliation_used"] is not False or value["authority"] is not False):
+        fail("exact-file execution receipt mismatch")
+    generated = integer(value["generated_at_epoch"], "exact_file_receipt.generated_at_epoch", minimum=package["generated_at_epoch"])
+    if generated > postcheck_generated or generated > package["expires_at_epoch"]:
+        fail("exact-file execution receipt timestamp outside execution bounds")
+
+
 def external_reviewer_trust() -> dict[str, Any] | None:
     names = {
         "path": "WAPP_EMERGENCY_REVIEWER_TRUST_ANCHORS_FILE",
@@ -559,7 +645,7 @@ def verify_action(action: Any, index: int) -> tuple[int, str]:
     restores, automatic = verify_rollback(action["rollback"], f"{label}.rollback")
 
     if primitive in {"QUARANTINE_EXACT_FILE", "REPLACE_EXACT_FILE"}:
-        exact_keys(target, {"path", "parent_device", "parent_inode", "device", "inode", "mode", "file_type"}, f"{label}.target")
+        exact_keys(target, {"path", "parent_device", "parent_inode", "device", "inode", "mode", "uid", "gid", "file_type"}, f"{label}.target")
         absolute(target["path"], f"{label}.target.path")
         for key in ("parent_device", "parent_inode", "device", "inode"):
             if not re.fullmatch(r"[1-9][0-9]*", string(target[key], f"{label}.target.{key}")):
@@ -568,6 +654,9 @@ def verify_action(action: Any, index: int) -> tuple[int, str]:
             fail(f"{label}.target.file_type invalid")
         if not re.fullmatch(r"0[0-7]{3}", string(target["mode"], f"{label}.target.mode")):
             fail(f"{label}.target.mode invalid")
+        for key in ("uid", "gid"):
+            if not re.fullmatch(r"[0-9]+", string(target[key], f"{label}.target.{key}")):
+                fail(f"{label}.target.{key} invalid")
         expected_stage = "EXECUTABLE" if primitive == "QUARANTINE_EXACT_FILE" else "CONFIG"
         if stage != expected_stage:
             fail(f"{label} stage/primitive mismatch")
@@ -719,7 +808,7 @@ def verify_reopen_source_lineage(
         or plan["operation_id"] != remediation["operation_id"] or plan["root"] != remediation["root"]
         or plan["package"] != continuation["remediation_package"] or plan["public_core_commit"] != remediation["product_commit"]
         or not HEX64.fullmatch(string(plan["sites_config_sha256"], "continuation.coherent_plan.sites_config_sha256"))
-        or not HEX64.fullmatch(string(plan["action_contract_sha256"], "continuation.coherent_plan.action_contract_sha256"))
+        or plan["action_contract_sha256"] != canonical_digest(remediation_value["actions"])
         or plan["stages"] != ["PREPARED", "FILES_APPLIED", "DB_APPLIED", "IDENTITY_APPLIED", "POSTCHECK_VERIFIED"]
         or plan["human_operator_required"] is not True or plan["bounded_consumers_own_exact_mutations"] is not True
         or plan["filesystem_database_acid_claimed"] is not False or plan["scope_expansion_allowed"] is not False
@@ -763,7 +852,10 @@ def verify_reopen_source_lineage(
                 fail("reopen coherent plan action/consumer mismatch")
             observed_orders.append(order)
         observed_consumers.append(consumer)
-        plan_dependencies.append(str(bound_file(dispatch["binding"], f"continuation.coherent_plan.dispatch[{index}].binding")))
+        binding_path = bound_file(dispatch["binding"], f"continuation.coherent_plan.dispatch[{index}].binding")
+        if consumer == "BOUNDED_QUARANTINE_EXACT_FILE":
+            verify_exact_file_binding(binding_path, remediation_value, remediation_path, orders)
+        plan_dependencies.append(str(binding_path))
     if (observed_orders != list(range(1, len(actions) + 1)) or plan["apply_order"] != observed_consumers
         or plan["rollback_order"] != list(reversed(observed_consumers))):
         fail("reopen coherent plan complete ordering mismatch")
@@ -814,7 +906,7 @@ def verify_reopen_source_lineage(
             fail("execution postcheck dispatch result malformed")
         exact_keys(result, {
             "order", "consumer", "result_sha256", "primitive_orders", "mutation_state",
-            "poststate_verified", "target_cardinality_verified",
+            "poststate_verified", "target_cardinality_verified", "native_receipt",
         }, f"execution_postcheck.dispatch_results[{index}]")
         primitive_orders = result["primitive_orders"]
         if (integer(result["order"], f"execution_postcheck.dispatch_results[{index}].order", minimum=1) != index + 1
@@ -824,6 +916,13 @@ def verify_reopen_source_lineage(
             or result["mutation_state"] != "COMPLETED_AS_DECLARED"
             or result["poststate_verified"] is not True or result["target_cardinality_verified"] is not True):
             fail("execution postcheck exact dispatch/poststate mismatch")
+        if result["consumer"] == "BOUNDED_QUARANTINE_EXACT_FILE":
+            receipt_path = bound_file(result["native_receipt"], f"execution_postcheck.dispatch_results[{index}].native_receipt")
+            if sha(receipt_path) != result["result_sha256"]:
+                fail("exact-file receipt/result hash mismatch")
+            verify_exact_file_receipt(receipt_path, remediation_value, remediation_path, primitive_orders, postcheck["isolated_root"], postcheck["generated_at_epoch"])
+        elif result["native_receipt"] is not None:
+            fail("non-file dispatch cannot carry native receipt")
     if (postcheck["tool"] != "wapp-security-emergency-execution-postcheck" or postcheck["schema"] != 2
         or postcheck["state"] != "APPLIED_EXACT_AND_POSTCHECK_VERIFIED_YELLOW" or postcheck["domain"] != domain
         or postcheck["root"] != site["root"] or postcheck["remediation_operation_id"] != remediation["operation_id"]
@@ -1242,6 +1341,8 @@ def verify_package(
         fail("quarantine targets must be unique canonical lexical byte order")
     if len(set(quarantine_objects)) != len(quarantine_objects):
         fail("quarantine targets contain duplicate physical object")
+    if len(quarantine_actions) > 64:
+        fail("quarantine target cardinality exceeds native bounded contract")
     if phase == "REOPEN":
         if value["contract"] != "HUMAN_OPERATOR_EMERGENCY_SELF_ISOLATED" or len(actions) != 1 or actions[0]["primitive"] != "REOPEN_ATOMIC_DOCROOT" or actions[0]["target"]["canonical_root"] != site["root"]:
             fail("reopen package must contain exactly one bound atomic docroot reopen")

@@ -42,9 +42,61 @@ q="$TMP/home/.wapp-security-exact-file-$operation/files";cmp "$q/a/one.php" <(pr
 [[ "$(cat "$TMP/home/site/a/one.php")" == alpha&&"$(cat "$TMP/home/site/b/two.php")" == beta&&"$(stat -c %a "$TMP/home/site/a/one.php")" == 640&&"$(stat -c %a "$TMP/home/site/b/two.php")" == 600 ]]||fail rollback_not_exact
 "$TMP/helper" observe-original "$TMP/home/site" "$operation" "$root_dev" "$root_ino" "$manifest_sha" "$manifest_hex" "$parent_sha" "$parent_hex" "$qdev" "$qino" "$runtime" QUARANTINE_EXACT_FILE_V1 |grep -Fq $'ORIGINAL_EXACT\t2'
 
-# Drift, ordering, symlink, duplicate-inode and collision adversarial contracts.
+# Drift, ordering, symlink, hardlink, collision, manifest, parent-identity,
+# recovery and reconciliation adversarial contracts.
 expect_fail(){ local label="$1";shift;if "$@" >"$TMP/$label.out" 2>"$TMP/$label.err";then fail "$label";fi; }
-badop=1123456789abcdef0123456789abcdef;cp "$TMP/manifest" "$TMP/drift";printf changed >"$TMP/home/site/a/one.php";badhex="$(xxd -p "$TMP/drift"|tr -d '\n')";expect_fail sha_drift "$TMP/helper" apply "$TMP/home/site" "$badop" "$root_dev" "$root_ino" "$manifest_sha" "$badhex" "$parent_sha" "$parent_hex" 0 0 "$runtime" QUARANTINE_EXACT_FILE_V1
-mv "$TMP/home/site/a/one.php" "$TMP/home/site/a/real";ln -s real "$TMP/home/site/a/one.php";badop=2123456789abcdef0123456789abcdef;expect_fail symlink "$TMP/helper" apply "$TMP/home/site" "$badop" "$root_dev" "$root_ino" "$manifest_sha" "$badhex" "$parent_sha" "$parent_hex" 0 0 "$runtime" QUARANTINE_EXACT_FILE_V1
-grep -Fq 'target exact prestate drift' "$TMP/symlink.err"||fail symlink_reason
-printf 'PASS: native exact-file bounded multi-target apply/observe/rollback and adversarial drift\n'
+prepare_case(){
+  CASE="$TMP/case-$1";mkdir -m 755 -p "$CASE/home/site/a" "$CASE/home/site/b"
+  printf alpha >"$CASE/home/site/a/one.php";printf beta >"$CASE/home/site/b/two.php";chmod 640 "$CASE/home/site/a/one.php";chmod 600 "$CASE/home/site/b/two.php"
+  python3 - "$CASE/home/site" "$CASE/manifest" "$CASE/parents" <<'PY'
+import hashlib,pathlib,stat,sys
+root=pathlib.Path(sys.argv[1]);rows=[];parents=[]
+for rel in ['a/one.php','b/two.php']:
+ p=root/rel;s=p.stat();ps=p.parent.stat();rows.append('\t'.join([rel.encode().hex(),hashlib.sha256(p.read_bytes()).hexdigest(),str(s.st_size),str(stat.S_IMODE(s.st_mode)),str(s.st_uid),str(s.st_gid),str(s.st_dev),str(s.st_ino)]));parents.append(f'{ps.st_dev}\t{ps.st_ino}')
+pathlib.Path(sys.argv[2]).write_text('\n'.join(rows)+'\n');pathlib.Path(sys.argv[3]).write_text('\n'.join(parents)+'\n')
+PY
+  M="$CASE/manifest";P="$CASE/parents";MS="$(shasum -a 256 "$M"|awk '{print $1}')";MH="$(xxd -p "$M"|tr -d '\n')";PS="$(shasum -a 256 "$P"|awk '{print $1}')";PH="$(xxd -p "$P"|tr -d '\n')";RD="$(stat -c %d "$CASE/home/site")";RI="$(stat -c %i "$CASE/home/site")"
+}
+apply_case(){
+  local op="$1" out
+  out="$("$TMP/helper" apply "$CASE/home/site" "$op" "$RD" "$RI" "$MS" "$MH" "$PS" "$PH" 0 0 "$runtime" QUARANTINE_EXACT_FILE_V1)"
+  QD="$(cut -f5 <<<"$out")";QI="$(cut -f6 <<<"$out")";Q="$CASE/home/.wapp-security-exact-file-$op"
+  grep -Fq $'QUARANTINED_EXACT\t2' <<<"$out"||fail apply_case
+}
+
+prepare_case drift;printf changed >"$CASE/home/site/a/one.php";expect_fail sha_drift "$TMP/helper" apply "$CASE/home/site" 1123456789abcdef0123456789abcdef "$RD" "$RI" "$MS" "$MH" "$PS" "$PH" 0 0 "$runtime" QUARANTINE_EXACT_FILE_V1
+prepare_case symlink;mv "$CASE/home/site/a/one.php" "$CASE/home/site/a/real";ln -s real "$CASE/home/site/a/one.php";expect_fail symlink "$TMP/helper" apply "$CASE/home/site" 2123456789abcdef0123456789abcdef "$RD" "$RI" "$MS" "$MH" "$PS" "$PH" 0 0 "$runtime" QUARANTINE_EXACT_FILE_V1;grep -Fq 'target exact prestate drift' "$TMP/symlink.err"||fail symlink_reason
+
+prepare_case unordered;sed '1!G;h;$!d' "$M" >"$CASE/unordered";sed '1!G;h;$!d' "$P" >"$CASE/unordered-parents";UMS="$(shasum -a 256 "$CASE/unordered"|awk '{print $1}')";UMH="$(xxd -p "$CASE/unordered"|tr -d '\n')";UPS="$(shasum -a 256 "$CASE/unordered-parents"|awk '{print $1}')";UPH="$(xxd -p "$CASE/unordered-parents"|tr -d '\n')";expect_fail unordered "$TMP/helper" apply "$CASE/home/site" 3123456789abcdef0123456789abcdef "$RD" "$RI" "$UMS" "$UMH" "$UPS" "$UPH" 0 0 "$runtime" QUARANTINE_EXACT_FILE_V1;grep -Fq 'canonical lexical order' "$TMP/unordered.err"||fail unordered_reason
+
+prepare_case hardlink;rm "$CASE/home/site/b/two.php";ln "$CASE/home/site/a/one.php" "$CASE/home/site/b/two.php";python3 - "$CASE/home/site" "$M" "$P" <<'PY'
+import hashlib,pathlib,stat,sys
+r=pathlib.Path(sys.argv[1]);rows=[];parents=[]
+for rel in ['a/one.php','b/two.php']:
+ p=r/rel;s=p.stat();ps=p.parent.stat();rows.append('\t'.join([rel.encode().hex(),hashlib.sha256(p.read_bytes()).hexdigest(),str(s.st_size),str(stat.S_IMODE(s.st_mode)),str(s.st_uid),str(s.st_gid),str(s.st_dev),str(s.st_ino)]));parents.append(f'{ps.st_dev}\t{ps.st_ino}')
+pathlib.Path(sys.argv[2]).write_text('\n'.join(rows)+'\n');pathlib.Path(sys.argv[3]).write_text('\n'.join(parents)+'\n')
+PY
+MS="$(shasum -a 256 "$M"|awk '{print $1}')";MH="$(xxd -p "$M"|tr -d '\n')";expect_fail hardlink "$TMP/helper" apply "$CASE/home/site" 4123456789abcdef0123456789abcdef "$RD" "$RI" "$MS" "$MH" "$PS" "$PH" 0 0 "$runtime" QUARANTINE_EXACT_FILE_V1;grep -Fq 'target exact prestate drift' "$TMP/hardlink.err"||fail hardlink_reason
+
+prepare_case collision;mkdir -m 700 "$CASE/home/.wapp-security-exact-file-5123456789abcdef0123456789abcdef";expect_fail quarantine_collision "$TMP/helper" apply "$CASE/home/site" 5123456789abcdef0123456789abcdef "$RD" "$RI" "$MS" "$MH" "$PS" "$PH" 0 0 "$runtime" QUARANTINE_EXACT_FILE_V1;grep -Fq 'quarantine destination collision' "$TMP/quarantine_collision.err"||fail collision_reason
+
+prepare_case crossfs;python3 - "$M" <<'PY'
+import pathlib
+p=pathlib.Path(__import__('sys').argv[1]);rows=[]
+for row in p.read_text().splitlines():
+ f=row.split('\t');f[6]=str(int(f[6])+1);rows.append('\t'.join(f))
+p.write_text('\n'.join(rows)+'\n')
+PY
+MS="$(shasum -a 256 "$M"|awk '{print $1}')";MH="$(xxd -p "$M"|tr -d '\n')";expect_fail cross_filesystem "$TMP/helper" apply "$CASE/home/site" 6123456789abcdef0123456789abcdef "$RD" "$RI" "$MS" "$MH" "$PS" "$PH" 0 0 "$runtime" QUARANTINE_EXACT_FILE_V1;grep -Fq 'filesystem drift' "$TMP/cross_filesystem.err"||fail cross_filesystem_reason
+
+prepare_case wrongq;apply_case 7123456789abcdef0123456789abcdef;expect_fail wrong_q_identity "$TMP/helper" observe-quarantined "$CASE/home/site" 7123456789abcdef0123456789abcdef "$RD" "$RI" "$MS" "$MH" "$PS" "$PH" "$QD" "$((QI+1))" "$runtime" QUARANTINE_EXACT_FILE_V1;grep -Fq 'quarantine root identity drift' "$TMP/wrong_q_identity.err"||fail wrong_q_identity_reason
+
+prepare_case manifest_substitution;apply_case 8123456789abcdef0123456789abcdef;chmod 600 "$Q/manifest.hex";printf 0 |dd of="$Q/manifest.hex" bs=1 seek=0 conv=notrunc status=none;chmod 400 "$Q/manifest.hex";expect_fail persisted_manifest "$TMP/helper" observe-quarantined "$CASE/home/site" 8123456789abcdef0123456789abcdef "$RD" "$RI" "$MS" "$MH" "$PS" "$PH" "$QD" "$QI" "$runtime" QUARANTINE_EXACT_FILE_V1;grep -Fq 'manifest substitution' "$TMP/persisted_manifest.err"||fail persisted_manifest_reason
+
+prepare_case parent_substitution;apply_case 9123456789abcdef0123456789abcdef;mv "$CASE/home/site/a" "$CASE/home/site/a-displaced";mkdir -m 755 "$CASE/home/site/a";expect_fail parent_identity "$TMP/helper" observe-quarantined "$CASE/home/site" 9123456789abcdef0123456789abcdef "$RD" "$RI" "$MS" "$MH" "$PS" "$PH" "$QD" "$QI" "$runtime" QUARANTINE_EXACT_FILE_V1;grep -Fq 'parent identity drift' "$TMP/parent_identity.err"||fail parent_identity_reason
+
+prepare_case rollback_collision;apply_case a123456789abcdef0123456789abcdef;printf collision >"$CASE/home/site/a/one.php";expect_fail rollback_collision "$TMP/helper" rollback "$CASE/home/site" a123456789abcdef0123456789abcdef "$RD" "$RI" "$MS" "$MH" "$PS" "$PH" "$QD" "$QI" "$runtime" QUARANTINE_EXACT_FILE_V1;grep -Fq 'PARTIAL_OR_DIVERGED' "$TMP/rollback_collision.out"||fail rollback_collision_state
+
+prepare_case reconcile;apply_case b123456789abcdef0123456789abcdef;chmod 640 "$Q/files/a/one.php";mv "$Q/files/a/one.php" "$CASE/home/site/a/one.php";"$TMP/helper" reconcile-rollback "$CASE/home/site" b123456789abcdef0123456789abcdef "$RD" "$RI" "$MS" "$MH" "$PS" "$PH" "$QD" "$QI" "$runtime" QUARANTINE_EXACT_FILE_V1 |grep -Fq $'ORIGINAL_EXACT_RECONCILED\t2';[[ "$(cat "$CASE/home/site/a/one.php")" == alpha&&"$(cat "$CASE/home/site/b/two.php")" == beta ]]||fail reconcile_bytes
+
+printf 'PASS: native exact-file bounded multi-target transaction and adversarial lifecycle matrix\n'
