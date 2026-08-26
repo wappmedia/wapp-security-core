@@ -18,6 +18,10 @@ INTEGER = re.compile(r"^(0|[1-9][0-9]*)$")
 MODE = re.compile(r"^[0-7]{3,4}$")
 TYPES = {"REGULAR", "DIRECTORY", "SYMLINK", "BLOCK_DEVICE", "CHAR_DEVICE", "FIFO", "SOCKET", "OTHER"}
 CHANGES = {"CREATED", "DELETED", "MODIFIED", "REPLACED"}
+RAW_BYTE_CAP = 125_829_120
+ARTIFACT_BYTE_CAP = 251_658_240
+LINE_BYTE_CAP = 32_768
+IO_CHUNK = 1_048_576
 
 
 def fail(message: str) -> "NoReturn":
@@ -32,7 +36,7 @@ def regular_nonsymlink(path: pathlib.Path) -> bytes:
         fail("raw capture unavailable")
     try:
         before = os.fstat(descriptor)
-        if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before_path.st_mode) or before.st_size > 125_829_120:
+        if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before_path.st_mode) or before.st_size > RAW_BYTE_CAP:
             fail("raw capture identity invalid")
         if (before.st_dev, before.st_ino, before.st_mode, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
             before_path.st_dev, before_path.st_ino, before_path.st_mode, before_path.st_size, before_path.st_mtime_ns, before_path.st_ctime_ns
@@ -41,11 +45,11 @@ def regular_nonsymlink(path: pathlib.Path) -> bytes:
         chunks: list[bytes] = []
         total = 0
         while True:
-            chunk = os.read(descriptor, min(1_048_576, 125_829_121 - total))
+            chunk = os.read(descriptor, min(IO_CHUNK, RAW_BYTE_CAP + 1 - total))
             if not chunk:
                 break
             total += len(chunk)
-            if total > 125_829_120:
+            if total > RAW_BYTE_CAP:
                 fail("raw capture byte cap")
             chunks.append(chunk)
         after = os.fstat(descriptor)
@@ -56,6 +60,96 @@ def regular_nonsymlink(path: pathlib.Path) -> bytes:
         return b"".join(chunks)
     finally:
         os.close(descriptor)
+
+
+def identity(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (value.st_dev, value.st_ino, value.st_mode, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+
+
+class BoundInput:
+    """Descriptor-bound, repeatable, bounded input without whole-file retention."""
+
+    def __init__(self, path: pathlib.Path, byte_cap: int, label: str):
+        self.path = path
+        self.byte_cap = byte_cap
+        self.label = label
+        try:
+            path_before = path.lstat()
+            self.descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        except OSError:
+            fail(f"{label} unavailable")
+        self.before = os.fstat(self.descriptor)
+        if (
+            not path.is_absolute()
+            or not stat.S_ISREG(self.before.st_mode)
+            or stat.S_ISLNK(path_before.st_mode)
+            or self.before.st_nlink != 1
+            or self.before.st_size < 1
+            or self.before.st_size > byte_cap
+            or identity(path_before) != identity(self.before)
+        ):
+            os.close(self.descriptor)
+            fail(f"{label} identity invalid")
+        self.handle = os.fdopen(self.descriptor, "rb", buffering=IO_CHUNK, closefd=False)
+        self.digest = hashlib.sha256()
+        self.total = 0
+
+    def rewind(self) -> None:
+        self.handle.seek(0)
+        self.digest = hashlib.sha256()
+        self.total = 0
+
+    def lines(self):
+        while True:
+            line = self.handle.readline(LINE_BYTE_CAP + 1)
+            if not line:
+                break
+            self.total += len(line)
+            if self.total > self.byte_cap or len(line) > LINE_BYTE_CAP or not line.endswith(b"\n") or b"\0" in line:
+                fail(f"{self.label} framing invalid")
+            self.digest.update(line)
+            try:
+                yield line[:-1].decode("ascii", "strict")
+            except UnicodeDecodeError:
+                fail(f"{self.label} is not canonical ASCII")
+        if self.total != self.before.st_size:
+            fail(f"{self.label} byte count drift")
+
+    def verify_stable(self) -> None:
+        self.handle.flush()
+        after = os.fstat(self.descriptor)
+        try:
+            path_after = self.path.lstat()
+        except OSError:
+            fail(f"{self.label} path unavailable after read")
+        if identity(self.before) != identity(after) or identity(after) != identity(path_after):
+            fail(f"{self.label} drift during verification")
+
+    def close(self) -> None:
+        self.handle.close()
+        os.close(self.descriptor)
+
+
+class BoundedWriter:
+    def __init__(self, descriptor: int, byte_cap: int):
+        self.descriptor = descriptor
+        self.byte_cap = byte_cap
+        self.total = 0
+
+    def write(self, payload: bytes) -> None:
+        if self.total + len(payload) > self.byte_cap:
+            fail("diagnostic artifact byte cap")
+        offset = 0
+        while offset < len(payload):
+            written = os.write(self.descriptor, payload[offset:])
+            if written <= 0:
+                fail("output write failed")
+            offset += written
+        self.total += len(payload)
+
+
+def json_bytes(value: object) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
 
 
 def write_exclusive(path: pathlib.Path, payload: bytes) -> None:
@@ -263,16 +357,63 @@ def validate_runtime_identity(runtime_hex: str, runtime_sha: str, helper_sha: st
     fail("runtime identity contract mismatch")
 
 
-def parse_raw(raw: bytes, expected_root: str, expected_operation: str, policy: dict[str, object], ephemeral_policy: dict[str, object]) -> dict[str, object]:
-    if b"\0" in raw:
-        fail("raw capture contains NUL")
+def parse_delta(line: str, previous: bytes | None) -> tuple[dict[str, object], bytes]:
+    fields = line.split("\t")
+    if len(fields) != 31 or fields[0] != "DRIFT" or fields[2] not in CHANGES:
+        fail("diagnostic delta invalid")
+    path = decode_hex(fields[1], absolute=False)
+    if previous is not None and path <= previous:
+        fail("diagnostic path order invalid")
+    exists1, exists2 = fields[3] == "true", fields[4] == "true"
+    if fields[3] not in ("true", "false") or fields[4] not in ("true", "false") or not (exists1 or exists2):
+        fail("diagnostic existence invalid")
+    pass1 = pass_state(fields[5:18], exists1)
+    pass2 = pass_state(fields[18:31], exists2)
+    expected_change = "CREATED" if not exists1 else "DELETED" if not exists2 else "REPLACED" if (
+        pass1["type"], pass1["device"], pass1["inode"]
+    ) != (pass2["type"], pass2["device"], pass2["inode"]) else "MODIFIED"
+    if fields[2] != expected_change or (exists1 and exists2 and pass1 == pass2):
+        fail("diagnostic change classification invalid")
+    return ({
+        "normalized_path_hex": fields[1],
+        "change_type": fields[2],
+        "pass1_exists": exists1,
+        "pass2_exists": exists2,
+        "pass1": pass1,
+        "pass2": pass2,
+    }, path)
+
+
+def parse_issue(line: str, previous: tuple[str, str, str, bool, bool] | None) -> tuple[dict[str, object], tuple[str, str, str, bool, bool]]:
+    fields = line.split("\t")
+    if len(fields) != 6 or fields[0] != "DRIFT_ISSUE" or not re.fullmatch(r"[A-Z0-9_]{1,64}", fields[2]) or not HEX64.fullmatch(fields[3]) or fields[4] not in ("true", "false") or fields[5] not in ("true", "false") or fields[4] == fields[5]:
+        fail("diagnostic issue delta invalid")
+    decode_hex(fields[1], absolute=False)
+    current = (fields[1], fields[2], fields[3], fields[4] == "true", fields[5] == "true")
+    if previous is not None and current <= previous:
+        fail("diagnostic issue order invalid")
+    return ({"normalized_path_hex": fields[1], "reason": fields[2], "detail_sha256": fields[3], "pass1_exists": fields[4] == "true", "pass2_exists": fields[5] == "true"}, current)
+
+
+def parse_raw_pass(
+    source: BoundInput,
+    expected_root: str,
+    expected_operation: str,
+    policy: dict[str, object],
+    ephemeral_policy: dict[str, object],
+    emit_delta=None,
+    after_deltas=None,
+    emit_issue=None,
+) -> dict[str, object]:
+    source.rewind()
+    iterator = iter(source.lines())
     try:
-        lines = raw.decode("ascii").splitlines()
-    except UnicodeDecodeError:
-        fail("raw capture is not canonical ASCII")
-    if len(lines) < 2 or lines[0] != f"CAPTURE_NONCE\t{expected_operation}":
+        nonce = next(iterator)
+        header = next(iterator).split("\t")
+    except StopIteration:
+        fail("diagnostic header missing")
+    if nonce != f"CAPTURE_NONCE\t{expected_operation}":
         fail("inventory operation binding mismatch")
-    header = lines[1].split("\t")
     if len(header) != 16 or header[0:2] != ["DRIFT_DIAGNOSTIC", "SIGNED_DRIFT_DIAGNOSTIC_MODE_V1"]:
         fail("diagnostic header invalid")
     if header[14:] != ["READ_ONLY", "NON_AUTHORIZING"]:
@@ -290,57 +431,43 @@ def parse_raw(raw: bytes, expected_root: str, expected_operation: str, policy: d
     issue_count = numeric(header[13], "issue delta count")
     if count > 200_000 or issue_count > 200_000 or count + issue_count == 0:
         fail("diagnostic delta cap")
+    previous: bytes | None = None
+    for index in range(count):
+        try:
+            delta, previous = parse_delta(next(iterator), previous)
+        except StopIteration:
+            fail("diagnostic cardinality mismatch")
+        if emit_delta is not None:
+            emit_delta(delta, index)
+    if after_deltas is not None:
+        after_deltas()
+    previous_issue = None
+    for index in range(issue_count):
+        try:
+            issue, previous_issue = parse_issue(next(iterator), previous_issue)
+        except StopIteration:
+            fail("diagnostic cardinality mismatch")
+        if emit_issue is not None:
+            emit_issue(issue, index)
     bootstrap_audit = None
-    delta_lines = lines[2:]
-    if delta_lines and delta_lines[-1].startswith("EPHEMERAL_BOOTSTRAP_AUDIT_V2\t"):
-        bootstrap_audit = delta_lines.pop()
+    audit = None
+    try:
+        trailing = next(iterator)
+    except StopIteration:
+        trailing = None
+    if trailing is not None:
+        if not trailing.startswith("EPHEMERAL_BOOTSTRAP_AUDIT_V2\t"):
+            fail("diagnostic trailing record invalid")
+        bootstrap_audit = trailing
         audit = bootstrap_audit.split("\t")
         if len(audit) != 9 or audit[1] != expected_operation or audit[-1] != "CLEANUP_VERIFIED" or any(not HEX64.fullmatch(audit[index]) for index in (5, 6, 7)):
             fail("ephemeral bootstrap audit invalid")
-    if len(delta_lines) != count + issue_count:
-        fail("diagnostic cardinality mismatch")
-    deltas: list[dict[str, object]] = []
-    issues: list[dict[str, object]] = []
-    previous: bytes | None = None
-    for line in delta_lines[:count]:
-        fields = line.split("\t")
-        if len(fields) != 31 or fields[0] != "DRIFT" or fields[2] not in CHANGES:
-            fail("diagnostic delta invalid")
-        path = decode_hex(fields[1], absolute=False)
-        if previous is not None and path <= previous:
-            fail("diagnostic path order invalid")
-        previous = path
-        exists1, exists2 = fields[3] == "true", fields[4] == "true"
-        if fields[3] not in ("true", "false") or fields[4] not in ("true", "false") or not (exists1 or exists2):
-            fail("diagnostic existence invalid")
-        pass1 = pass_state(fields[5:18], exists1)
-        pass2 = pass_state(fields[18:31], exists2)
-        expected_change = "CREATED" if not exists1 else "DELETED" if not exists2 else "REPLACED" if (
-            pass1["type"], pass1["device"], pass1["inode"]
-        ) != (pass2["type"], pass2["device"], pass2["inode"]) else "MODIFIED"
-        if fields[2] != expected_change or (exists1 and exists2 and pass1 == pass2):
-            fail("diagnostic change classification invalid")
-        deltas.append({
-            "normalized_path_hex": fields[1],
-            "change_type": fields[2],
-            "pass1_exists": exists1,
-            "pass2_exists": exists2,
-            "pass1": pass1,
-            "pass2": pass2,
-        })
-    issue_seen: set[tuple[str, str, str, bool, bool]] = set()
-    for line in delta_lines[count:]:
-        fields = line.split("\t")
-        if len(fields) != 6 or fields[0] != "DRIFT_ISSUE" or not re.fullmatch(r"[A-Z0-9_]{1,64}", fields[2]) or not HEX64.fullmatch(fields[3]) or fields[4] not in ("true", "false") or fields[5] not in ("true", "false") or fields[4] == fields[5]:
-            fail("diagnostic issue delta invalid")
-        decode_hex(fields[1], absolute=False)
-        identity = (fields[1], fields[2], fields[3], fields[4] == "true", fields[5] == "true")
-        if identity in issue_seen:
-            fail("diagnostic duplicate issue delta")
-        issue_seen.add(identity)
-        issues.append({"normalized_path_hex": fields[1], "reason": fields[2], "detail_sha256": fields[3], "pass1_exists": fields[4] == "true", "pass2_exists": fields[5] == "true"})
+        try:
+            next(iterator)
+            fail("diagnostic trailing data")
+        except StopIteration:
+            pass
     if bootstrap_audit:
-        audit = bootstrap_audit.split("\t")
         metadata = runtime.get("launcher_metadata")
         if not isinstance(metadata, dict):
             fail("ephemeral runtime metadata missing")
@@ -370,21 +497,22 @@ def parse_raw(raw: bytes, expected_root: str, expected_operation: str, policy: d
         "helper_sha256": header[9],
         "runtime_identity_sha256": header[10],
         "runtime_identity": runtime,
-        "deltas": deltas,
-        "issue_deltas": issues,
+        "delta_count": count,
+        "issue_delta_count": issue_count,
         "ephemeral_bootstrap_audit": lifecycle,
         "ephemeral_bootstrap_audit_sha256": hashlib.sha256((bootstrap_audit + "\n").encode("ascii")).hexdigest() if bootstrap_audit else None,
     }
 
 
-def build(raw_path: pathlib.Path, expected_root: str, operation: str, observed_at: str, product_seal_path: pathlib.Path, root: pathlib.Path) -> dict[str, object]:
-    if not raw_path.is_absolute() or not expected_root.startswith("/") or not HEX64.fullmatch(operation):
+def build_metadata(source: BoundInput, expected_root: str, operation: str, observed_at: str, product_seal_path: pathlib.Path, root: pathlib.Path) -> dict[str, object]:
+    if not source.path.is_absolute() or not expected_root.startswith("/") or not HEX64.fullmatch(operation):
         fail("bounded invocation invalid")
-    raw = regular_nonsymlink(raw_path)
     policy = load_policy(root / "config/native-filesystem-helper.json")
     ephemeral_policy = json.loads((root / "config/native-ephemeral-bootstrap.json").read_text(encoding="utf-8"))
     product_seal = load_product_seal(product_seal_path, root)
-    parsed = parse_raw(raw, expected_root, operation, policy, ephemeral_policy)
+    parsed = parse_raw_pass(source, expected_root, operation, policy, ephemeral_policy)
+    raw_sha256 = source.digest.hexdigest()
+    source.verify_stable()
     version = (root / "VERSION").read_text(encoding="ascii").strip()
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
         fail("Public Core version invalid")
@@ -399,13 +527,264 @@ def build(raw_path: pathlib.Path, expected_root: str, operation: str, observed_a
         "inventory_operation_id": operation,
         "public_core_version": version,
         "product_seal": product_seal,
-        "raw_capture": {"path": str(raw_path), "sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)},
+        "raw_capture": {"path": str(source.path), "sha256": raw_sha256, "bytes": source.total},
         **parsed,
     }
 
 
-def canonical(value: dict[str, object]) -> bytes:
-    return (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode("utf-8")
+def write_artifact(output: pathlib.Path, source: BoundInput, metadata: dict[str, object], expected_root: str, operation: str, policy: dict[str, object], ephemeral_policy: dict[str, object]) -> None:
+    try:
+        descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except OSError:
+        fail("output exclusive create failed")
+    created = os.fstat(descriptor)
+    writer = BoundedWriter(descriptor, ARTIFACT_BYTE_CAP)
+
+    def pair(key: str, value: object, first: bool = False) -> None:
+        writer.write((b"" if first else b",") + json_bytes(key) + b":" + json_bytes(value))
+
+    try:
+        writer.write(b"{")
+        pair("authority", metadata["authority"], True)
+        pair("decision_eligible", metadata["decision_eligible"])
+        writer.write(b',"deltas":[')
+
+        def emit_delta(value: dict[str, object], index: int) -> None:
+            writer.write((b"" if index == 0 else b",") + json_bytes(value))
+
+        def after_deltas() -> None:
+            writer.write(b']')
+            pair("descriptor_bound", metadata["descriptor_bound"])
+            pair("diagnostic_mode", metadata["diagnostic_mode"])
+            pair("ephemeral_bootstrap_audit", metadata["ephemeral_bootstrap_audit"])
+            pair("ephemeral_bootstrap_audit_sha256", metadata["ephemeral_bootstrap_audit_sha256"])
+            pair("helper_sha256", metadata["helper_sha256"])
+            pair("inventory_operation_id", metadata["inventory_operation_id"])
+            writer.write(b',"issue_deltas":[')
+
+        def emit_issue(value: dict[str, object], index: int) -> None:
+            writer.write((b"" if index == 0 else b",") + json_bytes(value))
+
+        second = parse_raw_pass(source, expected_root, operation, policy, ephemeral_policy, emit_delta, after_deltas, emit_issue)
+        source.verify_stable()
+        for key in ("root_path_hex", "pass1_root", "pass2_root", "pass1_snapshot_sha256", "pass2_snapshot_sha256", "helper_sha256", "runtime_identity_sha256", "runtime_identity", "delta_count", "issue_delta_count", "ephemeral_bootstrap_audit", "ephemeral_bootstrap_audit_sha256"):
+            if second[key] != metadata[key]:
+                fail("raw capture changed between bounded passes")
+        if source.digest.hexdigest() != metadata["raw_capture"]["sha256"] or source.total != metadata["raw_capture"]["bytes"]:
+            fail("raw capture bytes changed between bounded passes")
+        writer.write(b']')
+        pair("observed_at", metadata["observed_at"])
+        pair("pass1_root", metadata["pass1_root"])
+        pair("pass1_snapshot_sha256", metadata["pass1_snapshot_sha256"])
+        pair("pass2_root", metadata["pass2_root"])
+        pair("pass2_snapshot_sha256", metadata["pass2_snapshot_sha256"])
+        pair("product_seal", metadata["product_seal"])
+        pair("public_core_version", metadata["public_core_version"])
+        pair("raw_capture", metadata["raw_capture"])
+        pair("root_path_hex", metadata["root_path_hex"])
+        pair("runtime_identity", metadata["runtime_identity"])
+        pair("runtime_identity_sha256", metadata["runtime_identity_sha256"])
+        pair("schema", metadata["schema"])
+        pair("tool", metadata["tool"])
+        writer.write(b"}\n")
+        os.fsync(descriptor)
+    except BaseException:
+        os.close(descriptor)
+        try:
+            current = output.lstat()
+            if (current.st_dev, current.st_ino) == (created.st_dev, created.st_ino):
+                output.unlink()
+        except OSError:
+            pass
+        raise
+    os.close(descriptor)
+
+
+class JsonStream:
+    """Small strict JSON reader used only to recover immutable derivation inputs."""
+
+    def __init__(self, source: BoundInput):
+        self.source = source
+        self.source.rewind()
+        self.handle = source.handle
+        self.buffer = b""
+        self.offset = 0
+
+    def _fill(self) -> bool:
+        if self.offset < len(self.buffer):
+            return True
+        chunk = self.handle.read(IO_CHUNK)
+        if not chunk:
+            self.buffer = b""
+            self.offset = 0
+            return False
+        self.source.total += len(chunk)
+        if self.source.total > self.source.byte_cap:
+            fail("artifact byte cap")
+        self.source.digest.update(chunk)
+        self.buffer = chunk
+        self.offset = 0
+        return True
+
+    def peek(self) -> int | None:
+        return self.buffer[self.offset] if self._fill() else None
+
+    def take(self) -> int:
+        value = self.peek()
+        if value is None:
+            fail("artifact JSON truncated")
+        self.offset += 1
+        return value
+
+    def whitespace(self) -> None:
+        while self.peek() in (9, 10, 13, 32):
+            self.take()
+
+    def expect(self, value: int) -> None:
+        self.whitespace()
+        if self.take() != value:
+            fail("artifact JSON invalid")
+
+    def string(self) -> str:
+        self.whitespace()
+        if self.take() != 34:
+            fail("artifact JSON string required")
+        raw = bytearray(b'"')
+        escaped = False
+        while True:
+            item = self.take()
+            raw.append(item)
+            if len(raw) > LINE_BYTE_CAP:
+                fail("artifact JSON string cap")
+            if item < 32:
+                fail("artifact JSON control character")
+            if escaped:
+                escaped = False
+            elif item == 92:
+                escaped = True
+            elif item == 34:
+                break
+        try:
+            value = json.loads(bytes(raw))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            fail("artifact JSON string invalid")
+        if not isinstance(value, str):
+            fail("artifact JSON string invalid")
+        return value
+
+    def literal(self) -> None:
+        self.whitespace()
+        token = bytearray()
+        while self.peek() is not None and self.peek() not in (9, 10, 13, 32, 44, 93, 125):
+            token.append(self.take())
+            if len(token) > 128:
+                fail("artifact JSON scalar cap")
+        try:
+            json.loads(bytes(token))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            fail("artifact JSON scalar invalid")
+
+    def skip(self, depth: int = 0) -> None:
+        if depth > 32:
+            fail("artifact JSON depth cap")
+        self.whitespace()
+        current = self.peek()
+        if current == 34:
+            self.string()
+        elif current == 123:
+            self.take();self.whitespace()
+            if self.peek() == 125:
+                self.take();return
+            while True:
+                self.string();self.expect(58);self.skip(depth + 1);self.whitespace();separator = self.take()
+                if separator == 125:return
+                if separator != 44:fail("artifact JSON object invalid")
+        elif current == 91:
+            self.take();self.whitespace()
+            if self.peek() == 93:
+                self.take();return
+            while True:
+                self.skip(depth + 1);self.whitespace();separator = self.take()
+                if separator == 93:return
+                if separator != 44:fail("artifact JSON array invalid")
+        else:
+            self.literal()
+
+    def selected_object(self, wanted: set[str]) -> dict[str, str]:
+        result = {}
+        seen = set()
+        self.expect(123);self.whitespace()
+        if self.peek() == 125:
+            self.take();return result
+        while True:
+            key = self.string()
+            if key in seen:fail("artifact duplicate JSON key")
+            seen.add(key);self.expect(58)
+            if key in wanted:
+                result[key] = self.string()
+            else:
+                self.skip(1)
+            self.whitespace();separator = self.take()
+            if separator == 125:return result
+            if separator != 44:fail("artifact JSON object invalid")
+
+
+def extract_bindings(artifact: pathlib.Path) -> dict[str, str]:
+    source = BoundInput(artifact, ARTIFACT_BYTE_CAP, "diagnostic artifact")
+    reader = JsonStream(source)
+    wanted_strings = {"inventory_operation_id", "observed_at", "root_path_hex", "tool"}
+    result = {}
+    seen = set()
+    reader.expect(123);reader.whitespace()
+    while reader.peek() != 125:
+        key = reader.string()
+        if key in seen:fail("artifact duplicate top-level key")
+        seen.add(key);reader.expect(58)
+        if key in wanted_strings:
+            result[key] = reader.string()
+        elif key == "product_seal":
+            selected = reader.selected_object({"path"})
+            result["product_seal_path"] = selected.get("path", "")
+        elif key == "raw_capture":
+            selected = reader.selected_object({"path"})
+            result["raw_capture_path"] = selected.get("path", "")
+        else:
+            reader.skip(1)
+        reader.whitespace();separator = reader.take()
+        if separator == 125:break
+        if separator != 44:fail("artifact JSON object invalid")
+    reader.whitespace()
+    if reader.peek() is not None:fail("artifact JSON trailing data")
+    source.verify_stable();source.close()
+    required = wanted_strings | {"product_seal_path", "raw_capture_path"}
+    if set(result) != required or result["tool"] != "wapp-security-signed-drift-diagnostic" or not result["product_seal_path"].startswith("/") or not result["raw_capture_path"].startswith("/"):
+        fail("artifact derivation bindings missing")
+    return result
+
+
+def compare_bound_files(left: pathlib.Path, right: pathlib.Path) -> bool:
+    first = BoundInput(left, ARTIFACT_BYTE_CAP, "diagnostic artifact")
+    second = BoundInput(right, ARTIFACT_BYTE_CAP, "rederived artifact")
+    same = first.before.st_size == second.before.st_size
+    if same:
+        while True:
+            a = first.handle.read(IO_CHUNK);b = second.handle.read(IO_CHUNK)
+            if a != b:
+                same = False;break
+            if not a:break
+    first.verify_stable();second.verify_stable();first.close();second.close()
+    return same
+
+
+def create_artifact(raw_path: pathlib.Path, expected_root: str, operation: str, observed_at: str, product_seal: pathlib.Path, output: pathlib.Path, root: pathlib.Path) -> None:
+    source = BoundInput(raw_path, RAW_BYTE_CAP, "raw capture")
+    try:
+        metadata = build_metadata(source, expected_root, operation, observed_at, product_seal, root)
+        policy = load_policy(root / "config/native-filesystem-helper.json")
+        ephemeral_policy = json.loads((root / "config/native-ephemeral-bootstrap.json").read_text(encoding="utf-8"))
+        write_artifact(output, source, metadata, expected_root, operation, policy, ephemeral_policy)
+    finally:
+        source.close()
 
 
 def main() -> None:
@@ -414,32 +793,28 @@ def main() -> None:
         raw_path, expected_root, operation, observed_at, product_seal, output = pathlib.Path(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5], pathlib.Path(sys.argv[6]), pathlib.Path(sys.argv[7])
         if not output.is_absolute() or output.exists() or output.is_symlink():
             fail("output collision or non-absolute path")
-        write_exclusive(output, canonical(build(raw_path, expected_root, operation, observed_at, product_seal, root)))
+        create_artifact(raw_path, expected_root, operation, observed_at, product_seal, output, root)
         return
     if len(sys.argv) == 3 and sys.argv[1] == "product-seal-path":
-        artifact = pathlib.Path(sys.argv[2]);value = json.loads(regular_nonsymlink(artifact));seal = value.get("product_seal") if isinstance(value, dict) else None
-        if not isinstance(seal, dict) or not isinstance(seal.get("path"), str) or not seal["path"].startswith("/"):
-            fail("Product Seal binding missing")
-        print(seal["path"])
+        print(extract_bindings(pathlib.Path(sys.argv[2]))["product_seal_path"])
         return
     if len(sys.argv) == 3 and sys.argv[1] == "verify":
         artifact = pathlib.Path(sys.argv[2])
-        raw = regular_nonsymlink(artifact)
+        bindings = extract_bindings(artifact)
         try:
-            value = json.loads(raw)
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            fail("artifact JSON invalid")
-        if not isinstance(value, dict) or value.get("tool") != "wapp-security-signed-drift-diagnostic" or value.get("schema") != 1:
-            fail("artifact type invalid")
-        capture = value.get("raw_capture")
-        if not isinstance(capture, dict) or not isinstance(capture.get("path"), str):
-            fail("raw capture binding missing")
-        seal = value.get("product_seal")
-        if not isinstance(seal, dict) or not isinstance(seal.get("path"), str):
-            fail("Product Seal binding missing")
-        expected = build(pathlib.Path(capture["path"]), os.fsdecode(bytes.fromhex(value.get("root_path_hex", ""))), value.get("inventory_operation_id", ""), value.get("observed_at", ""), pathlib.Path(seal["path"]), root)
-        if canonical(value) != canonical(expected):
-            fail("artifact derivation mismatch")
+            expected_root = os.fsdecode(decode_hex(bindings["root_path_hex"], absolute=True))
+        except (ValueError, UnicodeDecodeError):
+            fail("artifact root binding invalid")
+        temporary = artifact.parent / ("." + artifact.name + ".rederive-" + os.urandom(16).hex())
+        try:
+            create_artifact(pathlib.Path(bindings["raw_capture_path"]), expected_root, bindings["inventory_operation_id"], bindings["observed_at"], pathlib.Path(bindings["product_seal_path"]), temporary, root)
+            if not compare_bound_files(artifact, temporary):
+                fail("artifact derivation mismatch")
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
         print("SIGNED_DRIFT_DIAGNOSTIC: VERIFIED_NON_AUTHORIZING")
         return
     fail("usage")
