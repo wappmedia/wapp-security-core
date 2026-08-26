@@ -30,13 +30,16 @@ Reopen is a separate registry entry and one-shot package. Its source remediation
 must already be consumed and is admitted only through the explicit
 `CONSUMED_EXECUTED_REMEDIATION_LINEAGE_VERIFIED_FOR_REOPEN` semantics: exact
 source package/review/registry/consumption identity, coherent plan, completed
-signed execution audit, exact dispatch cardinality and a fresh exact-isolation
-observation must all agree. The consumed package is immutable historical
+signed execution audit, a typed exact mutation/poststate receipt, exact dispatch
+cardinality and a fresh exact-isolation observation must all agree. Execution
+must also fall inside the source package's original validity interval. The
+consumed package is immutable historical
 provenance only; normal remediation validation continues to reject it.
 
 The distinct reopen has a new operation, package expiry, human phrase, review,
 registry authority and consumption marker. A fixed, source-marker-bound reopen
-reservation prevents two distinct reopen continuations from the same lineage.
+reservation commits cycle-safely to every new reopen-authority input and
+prevents two distinct reopen continuations from the same lineage.
 The reservation does not authorize source replay and remains part of the audit
 lineage after reopen. Reusing the remediation operation, review, marker or human
 approval fails closed. Reopen may only reverse the exact active isolation and
