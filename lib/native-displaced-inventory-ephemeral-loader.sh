@@ -13,7 +13,7 @@ MKDIR=/bin/mkdir
 CHMOD=/bin/chmod
 RM=/bin/rm
 RMDIR=/bin/rmdir
-LAUNCHER_SHA=ea94794ba573b36fa7bb70b7af9e84a45dccb3a2c9d4f27e6be13d4ef9c6b371
+LAUNCHER_SHA=6470e5522d9cddd7b733f3e248ae7aff25c44a3bb9aa52228addfbf62f697dfd
 LAUNCHER_BYTES=35944
 
 meta(){ "$STAT" -c '%u:%g:%a:%d:%i:%s' "$1" 2>/dev/null; }
@@ -88,7 +88,7 @@ hash_text(){ local value;value="$(LC_ALL=C "$OPENSSL" dgst -sha256 2>/dev/null)"
 target_root="${1:-}";capture_nonce="${2:-}";native_sha="${3:-}";native_bytes="${4:-}";capture_mode="${5:-inventory}";selected_rel_hex="${6:-}"
 [[ "$target_root" == /*&&"$target_root" != /&&${#target_root} -le 4096&&"$target_root" != */&&"$target_root" != *//* ]]||fail 'invalid bounded target'
 IFS=/ read -r -a root_parts <<<"${target_root#/}";for part in "${root_parts[@]}";do [[ -n "$part"&&"$part" != .&&"$part" != .. ]]||fail 'unsafe target component';done
-[[ "$capture_nonce" =~ ^[a-f0-9]{64}$&&"$native_sha" == 107feade2363ec810517f4e0796aad576f0966822e514acb0749df6dce13c41b&&"$native_bytes" == 92824 ]]||fail 'invalid release binding'
+[[ "$capture_nonce" =~ ^[a-f0-9]{64}$&&"$native_sha" == f1240b7a873033738c4fb23913706e73531c2be5667ff6b827f1d3c2f7dec047&&"$native_bytes" == 93304 ]]||fail 'invalid release binding'
 [[ ( "$capture_mode" == inventory||"$capture_mode" == diagnostic )&&-z "$selected_rel_hex"||"$capture_mode" == rollback&&"$selected_rel_hex" =~ ^[a-f0-9]{2,8192}$&&$((${#selected_rel_hex}%2)) -eq 0||"$capture_mode" == volatile-inventory&&${#selected_rel_hex} -le 32768&&"$selected_rel_hex" =~ ^[ACL]:[a-f0-9]+(,[ACL]:[a-f0-9]+)*$ ]]||fail 'invalid bounded capture mode'
 for tool in "$STAT" "$OPENSSL" "$MKDIR" "$CHMOD" "$RM" "$RMDIR";do trusted_file "$tool"||fail 'trusted base tools unavailable';done
 [[ -d "$target_root"&&! -L "$target_root" ]]||fail 'exact target root unavailable'
