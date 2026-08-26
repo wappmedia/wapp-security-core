@@ -350,6 +350,83 @@ def bound_file(value: Any, label: str, *, executable: bool = False) -> Path:
     return path
 
 
+def trusted_reopen_reservation(
+    value: Any, label: str, source_marker: Path,
+) -> tuple[Path, dict[str, Any]]:
+    """Read a reopen reservation without following the reservation namespace."""
+    if not isinstance(value, dict):
+        fail(f"{label} must be an object")
+    exact_keys(value, {"path", "sha256"}, label)
+    path = Path(absolute(value["path"], f"{label}.path"))
+    expected_sha = digest(value["sha256"], f"{label}.sha256")
+    legacy = source_marker / "reopen-reservation.json"
+    successors = source_marker / "reopen-successors"
+    if path == legacy:
+        relative_parts = ("reopen-reservation.json",)
+    elif path.parent == successors and re.fullmatch(r"[0-9a-f]{64}\.json", path.name):
+        relative_parts = ("reopen-successors", path.name)
+    else:
+        fail(f"{label} path is outside the canonical reservation namespace")
+    if not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
+        fail("reopen reservation descriptor protections unavailable")
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    file_flags = os.O_RDONLY | os.O_NOFOLLOW
+    descriptors: list[int] = []
+    try:
+        current = os.open(source_marker, directory_flags)
+        descriptors.append(current)
+        marker_info = os.fstat(current)
+        if (not stat.S_ISDIR(marker_info.st_mode)
+            or marker_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+            fail("reopen reservation source marker is untrusted")
+        for part in relative_parts[:-1]:
+            child = os.open(part, directory_flags, dir_fd=current)
+            descriptors.append(child)
+            current = child
+            info = os.fstat(current)
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != marker_info.st_uid
+                or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+                fail("reopen reservation namespace is untrusted")
+        descriptor = os.open(relative_parts[-1], file_flags, dir_fd=current)
+        descriptors.append(descriptor)
+        before = os.fstat(descriptor)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != marker_info.st_uid
+            or before.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+            fail("reopen reservation file is untrusted")
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            block = os.read(descriptor, 65536)
+            if not block:
+                break
+            total += len(block)
+            if total > 65536:
+                fail("reopen reservation exceeds bounded size")
+            chunks.append(block)
+        after = os.fstat(descriptor)
+        if ((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+            != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)):
+            fail("reopen reservation descriptor drift")
+        raw = b"".join(chunks)
+    except OSError as error:
+        fail(f"reopen reservation unavailable: {error}")
+    finally:
+        for descriptor in reversed(descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+    if hashlib.sha256(raw).hexdigest() != expected_sha:
+        fail(f"{label} identity/hash mismatch")
+    try:
+        result = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        fail(f"invalid reopen reservation JSON: {error}")
+    if not isinstance(result, dict):
+        fail("reopen reservation root must be an object")
+    return path, result
+
+
 def verify_product_seal(path: Path, declared_commit: str, *, current_runtime: bool = True) -> None:
     value = load(path)
     exact_keys(
@@ -788,20 +865,109 @@ def verify_reopen_source_lineage(
         or captured < postcheck_generated or captured > reopen_generated or reopen_generated - captured > 300):
         fail("reopen current isolated state mismatch/stale")
 
-    reservation_path = bound_file(continuation["reopen_reservation"], "continuation.reopen_reservation")
     source_marker = Path(remediation_value["one_shot"]["consumption_marker"])
     completed_reopen = source_marker / "reopen-completed"
     if completed_reopen.exists() or completed_reopen.is_symlink():
         fail("source remediation lineage already has a completed reopen")
-    reservation = load(reservation_path)
-    exact_keys(reservation, {"tool", "schema", "state", "domain", "root", "source_operation_id",
-        "source_package_sha256", "reopen_operation_id", "created_at_epoch", "expires_at_epoch",
-        "reopen_authority_sha256", "source_replay_allowed", "authority"}, "reopen reservation")
+    reservation_path, reservation = trusted_reopen_reservation(
+        continuation["reopen_reservation"], "continuation.reopen_reservation", source_marker,
+    )
     reservation_schema = integer(reservation["schema"], "reopen reservation.schema", minimum=1)
     if reservation_schema == 1:
+        exact_keys(reservation, {"tool", "schema", "state", "domain", "root", "source_operation_id",
+            "source_package_sha256", "reopen_operation_id", "created_at_epoch", "expires_at_epoch",
+            "reopen_authority_sha256", "source_replay_allowed", "authority"}, "reopen reservation")
         expected_reservation_path = source_marker / "reopen-reservation.json"
     elif reservation_schema == 2:
-        expected_reservation_path = source_marker / "reopen-reservations" / f"{reopen_operation}.json"
+        exact_keys(reservation, {"tool", "schema", "state", "domain", "root", "source_operation_id",
+            "source_package_sha256", "reopen_operation_id", "created_at_epoch", "expires_at_epoch",
+            "reopen_authority_sha256", "source_replay_allowed", "authority", "predecessor"},
+            "reopen reservation")
+        predecessor = reservation["predecessor"]
+        if not isinstance(predecessor, dict):
+            fail("reopen reservation predecessor must be an object")
+        exact_keys(predecessor, {"reservation", "package", "review", "consumption_identity",
+            "disposition", "disposition_review"}, "reopen reservation predecessor")
+        predecessor_path, predecessor_reservation = trusted_reopen_reservation(
+            predecessor["reservation"], "reopen reservation predecessor.reservation", source_marker,
+        )
+        predecessor_reservation_sha = digest(
+            predecessor["reservation"]["sha256"], "reopen reservation predecessor.reservation.sha256",
+        )
+        expected_reservation_path = source_marker / "reopen-successors" / f"{predecessor_reservation_sha}.json"
+        predecessor_package_path = bound_file(predecessor["package"], "reopen reservation predecessor.package")
+        predecessor_review_path = bound_file(predecessor["review"], "reopen reservation predecessor.review")
+        predecessor_package = load(predecessor_package_path)
+        verify_review(predecessor_review_path, predecessor_package_path)
+        if (predecessor_package.get("phase") != "REOPEN" or predecessor_package.get("domain") != domain
+            or not isinstance(predecessor_package.get("site"), dict)
+            or predecessor_package["site"].get("root") != site["root"]
+            or predecessor_package.get("operation_id") == reopen_operation
+            or not isinstance(predecessor_package.get("continuation"), dict)
+            or predecessor_package["continuation"].get("reopen_reservation") != predecessor["reservation"]):
+            fail("reopen predecessor package lineage mismatch")
+        predecessor_sha = sha(predecessor_package_path)
+        predecessor_operation = predecessor_package["operation_id"]
+        exact_keys(predecessor_reservation, {"tool", "schema", "state", "domain", "root",
+            "source_operation_id", "source_package_sha256", "reopen_operation_id", "created_at_epoch",
+            "expires_at_epoch", "reopen_authority_sha256", "source_replay_allowed", "authority"},
+            "reopen predecessor reservation")
+        if (predecessor_reservation["tool"] != "wapp-security-emergency-reopen-reservation"
+            or predecessor_reservation["schema"] != 1
+            or predecessor_path != source_marker / "reopen-reservation.json"
+            or predecessor_reservation["state"] != "RESERVED_FOR_DISTINCT_REOPEN"
+            or predecessor_reservation["domain"] != domain
+            or predecessor_reservation["root"] != site["root"]
+            or predecessor_reservation["source_operation_id"] != remediation["operation_id"]
+            or predecessor_reservation["source_package_sha256"] != remediation["package_sha256"]
+            or predecessor_reservation["reopen_operation_id"] != predecessor_operation
+            or predecessor_reservation["created_at_epoch"] != predecessor_package.get("generated_at_epoch")
+            or predecessor_reservation["expires_at_epoch"] != predecessor_package.get("expires_at_epoch")
+            or predecessor_reservation["reopen_authority_sha256"] != reopen_authority_digest(predecessor_package)
+            or predecessor_reservation["source_replay_allowed"] is not False
+            or predecessor_reservation["authority"] is not False):
+            fail("reopen predecessor reservation lineage mismatch")
+        predecessor_consumption = bound_file(
+            predecessor["consumption_identity"], "reopen reservation predecessor.consumption_identity",
+        )
+        expected_predecessor_consumption = Path(
+            predecessor_package.get("one_shot", {}).get("consumption_marker", "")
+        ) / "package-sha256"
+        if (predecessor_consumption != expected_predecessor_consumption
+            or predecessor_consumption.read_bytes() != (predecessor_sha + "\n").encode("ascii")):
+            fail("reopen predecessor consumption identity mismatch")
+        disposition_path = bound_file(predecessor["disposition"], "reopen reservation predecessor.disposition")
+        disposition_review_path = bound_file(
+            predecessor["disposition_review"], "reopen reservation predecessor.disposition_review",
+        )
+        disposition = load(disposition_path)
+        verify_review(disposition_review_path, disposition_path)
+        exact_keys(disposition, {"tool", "schema", "state", "domain", "root", "source_operation_id",
+            "source_package_sha256", "predecessor_reopen_operation_id", "predecessor_reopen_package_sha256",
+            "predecessor_reservation_sha256", "predecessor_consumption_sha256", "abort_stage",
+            "remote_access_started", "isolation_activated", "customer_mutation_state", "replay_allowed",
+            "supersession_authority", "generated_at_epoch", "authority"}, "reopen predecessor disposition")
+        if (disposition["tool"] != "wapp-security-emergency-reopen-predecessor-disposition"
+            or disposition["schema"] != 1
+            or disposition["state"] != "CONSUMED_PRE_REMOTE_ABORT_VERIFIED_UNMUTATED"
+            or disposition["domain"] != domain or disposition["root"] != site["root"]
+            or disposition["source_operation_id"] != remediation["operation_id"]
+            or disposition["source_package_sha256"] != remediation["package_sha256"]
+            or disposition["predecessor_reopen_operation_id"] != predecessor_operation
+            or disposition["predecessor_reopen_package_sha256"] != predecessor_sha
+            or disposition["predecessor_reservation_sha256"] != predecessor_reservation_sha
+            or disposition["predecessor_consumption_sha256"] != sha(predecessor_consumption)
+            or disposition["abort_stage"] != "PRE_REMOTE_SITE_IDENTITY_BINDING"
+            or disposition["remote_access_started"] is not False
+            or disposition["isolation_activated"] is not False
+            or disposition["customer_mutation_state"] != "NONE"
+            or disposition["replay_allowed"] is not False
+            or disposition["supersession_authority"] != "NEW_REOPEN_PACKAGE_ONLY"
+            or integer(disposition["generated_at_epoch"], "reopen predecessor disposition.generated_at_epoch",
+                minimum=integer(predecessor_package.get("generated_at_epoch"),
+                    "reopen predecessor package.generated_at_epoch", minimum=1)) > reopen_generated
+            or disposition["authority"] is not False):
+            fail("reopen predecessor disposition mismatch")
     else:
         fail("reopen reservation schema unsupported")
     if reservation_path != expected_reservation_path:
