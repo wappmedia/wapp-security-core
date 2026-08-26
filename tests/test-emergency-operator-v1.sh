@@ -312,9 +312,24 @@ mv "$reservation_namespace" "$reservation_namespace.physical";ln -s "$reservatio
 expect_fail reopen_reservation_symlink_parent python3 "$MODEL" verify-package --package "$reopen" --domain "$domain" --now-epoch "$now"
 rm "$reservation_namespace";mv "$reservation_namespace.physical" "$reservation_namespace"
 current_reservation="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["continuation"]["reopen_reservation"]["path"])' "$reopen")"
+chmod 0666 "$current_reservation"
+expect_fail reopen_reservation_writable_file python3 "$MODEL" verify-package --package "$reopen" --domain "$domain" --now-epoch "$now"
+chmod 0600 "$current_reservation"
 mv "$current_reservation" "$current_reservation.physical";ln -s "$current_reservation.physical" "$current_reservation"
 expect_fail reopen_reservation_symlink_file python3 "$MODEL" verify-package --package "$reopen" --domain "$domain" --now-epoch "$now"
 rm "$current_reservation";mv "$current_reservation.physical" "$current_reservation"
+nested_reservation="$run/consumed/reopen-successors/$(recovery_sha256_file "$current_reservation").json";nested_reopen="$run/reopen-nested-successor.json"
+python3 - "$reopen" "$reopen_review" "$current_reservation" "$nested_reservation" "$nested_reopen" <<'PY'
+import hashlib,json,os,sys
+source,review,current,reservation_path,out=sys.argv[1:]
+def ref(path):return {'path':path,'sha256':hashlib.sha256(open(path,'rb').read()).hexdigest()}
+package=json.load(open(source));package['operation_id']='d'*32;package['one_shot']['consumption_marker']=os.path.join(os.path.dirname(out),'nested-consumed')
+reservation=json.load(open(current));reservation['reopen_operation_id']=package['operation_id'];reservation['predecessor']={'reservation':ref(current),'package':ref(source),'review':ref(review),'consumption_identity':ref(source),'disposition':ref(current),'disposition_review':ref(review)}
+open(reservation_path,'w').write(json.dumps(reservation,sort_keys=True,separators=(',',':'))+'\n')
+package['continuation']['reopen_reservation']=ref(reservation_path);open(out,'w').write(json.dumps(package,sort_keys=True,separators=(',',':'))+'\n')
+PY
+sign "$nested_reservation";sign "$nested_reopen"
+expect_fail reopen_schema2_predecessor_chain python3 "$MODEL" verify-package --package "$nested_reopen" --domain "$domain" --now-epoch "$now"
 legacy_reservation="$run/consumed/reopen-reservation.json";legacy_reopen="$run/reopen-legacy-reservation.json"
 cp "$run/predecessor-reopen-package.json" "$legacy_reopen";sign "$legacy_reopen"
 mv "$run/predecessor-reopen-consumed" "$run/predecessor-reopen-consumed.hidden"
