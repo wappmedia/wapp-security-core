@@ -12,6 +12,7 @@ import re
 import stat
 import subprocess
 import sys
+import tempfile
 
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 INTEGER = re.compile(r"^(0|[1-9][0-9]*)$")
@@ -20,7 +21,8 @@ TYPES = {"REGULAR", "DIRECTORY", "SYMLINK", "BLOCK_DEVICE", "CHAR_DEVICE", "FIFO
 CHANGES = {"CREATED", "DELETED", "MODIFIED", "REPLACED"}
 RAW_BYTE_CAP = 125_829_120
 ARTIFACT_BYTE_CAP = 251_658_240
-LINE_BYTE_CAP = 32_768
+# Mirrors the helper's maximum diagnostic record including its newline.
+LINE_BYTE_CAP = 40_960
 IO_CHUNK = 1_048_576
 
 
@@ -805,7 +807,9 @@ def main() -> None:
             expected_root = os.fsdecode(decode_hex(bindings["root_path_hex"], absolute=True))
         except (ValueError, UnicodeDecodeError):
             fail("artifact root binding invalid")
-        temporary = artifact.parent / ("." + artifact.name + ".rederive-" + os.urandom(16).hex())
+        temporary_directory = pathlib.Path(tempfile.mkdtemp(prefix="wapp-drift-rederive-"))
+        os.chmod(temporary_directory, 0o700)
+        temporary = temporary_directory / "artifact.json"
         try:
             create_artifact(pathlib.Path(bindings["raw_capture_path"]), expected_root, bindings["inventory_operation_id"], bindings["observed_at"], pathlib.Path(bindings["product_seal_path"]), temporary, root)
             if not compare_bound_files(artifact, temporary):
@@ -814,6 +818,10 @@ def main() -> None:
             try:
                 temporary.unlink()
             except FileNotFoundError:
+                pass
+            try:
+                temporary_directory.rmdir()
+            except OSError:
                 pass
         print("SIGNED_DRIFT_DIAGNOSTIC: VERIFIED_NON_AUTHORIZING")
         return

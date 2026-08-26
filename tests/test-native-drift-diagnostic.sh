@@ -36,6 +36,9 @@ create "$TMP/two.json" >/dev/null
 cmp -s "$TMP/one.json" "$TMP/two.json"||fail deterministic_artifact
 cmp -s "$TMP/one.json.hmac" "$TMP/two.json.hmac"||fail deterministic_signature
 "$TOOL" verify --artifact "$TMP/one.json"|grep -Fq VERIFIED_NON_AUTHORIZING
+mkdir "$TMP/read-only-artifact";cp "$TMP/one.json" "$TMP/one.json.hmac" "$TMP/read-only-artifact/";chmod 500 "$TMP/read-only-artifact"
+"$TOOL" verify --artifact "$TMP/read-only-artifact/one.json"|grep -Fq VERIFIED_NON_AUTHORIZING||fail read_only_artifact_parent
+chmod 700 "$TMP/read-only-artifact"
 /usr/bin/python3 - "$TMP/one.json" "$operation" "$helper_sha" "$path_hex" <<'PY'
 import json,sys
 value=json.load(open(sys.argv[1]))
