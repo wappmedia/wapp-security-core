@@ -194,6 +194,29 @@ assert any(line.startswith('DRIFT_ISSUE\t') for line in lines)
 assert not any('before' in line or 'after' in line for line in lines)
 PY
 expect_fail stable_diagnostic /bin/bash "$TMP/probe" "$TEST_ROOT" "$NONCE" "$BINARY_SHA" "$BINARY_BYTES" diagnostic ''
+
+# The ordinary inventory remains strictly closed-world. Real modification,
+# replacement, delete/create and symlink substitution during the two passes
+# must abort rather than converting diagnostic knowledge into clearance.
+printf 'delete-again\n' >"$TEST_ROOT/a-delete.php"
+printf 'symlink-before\n' >"$TEST_ROOT/e-symlink.php"
+rm -f "$TEST_ROOT/d-create.php"
+(
+  sleep 0.2
+  rm -- "$TEST_ROOT/a-delete.php"
+  printf 'modify-again\n' >"$TEST_ROOT/b-modify.php"
+  printf 'replace-again\n' >"$TEST_ROOT/c-replacement.tmp"
+  mv -- "$TEST_ROOT/c-replacement.tmp" "$TEST_ROOT/c-replace.php"
+  printf 'create-again\n' >"$TEST_ROOT/d-create.php"
+  rm -- "$TEST_ROOT/e-symlink.php"
+  ln -s b-modify.php "$TEST_ROOT/e-symlink.php"
+) & inventory_mutator=$!
+expect_fail inventory_real_drift run_inventory
+wait "$inventory_mutator"
+grep -Fq 'inventory drift between passes' "$TMP/inventory_real_drift.err"||fail inventory_drift_not_fail_closed
+rm -f "$TEST_ROOT/d-create.php" "$TEST_ROOT/e-symlink.php"
+printf 'delete-stable\n' >"$TEST_ROOT/a-delete.php"
+printf 'symlink-stable\n' >"$TEST_ROOT/e-symlink.php"
 run_inventory >"$TMP/post-drift-stable.tsv"
 
 # Capacity regression: one bounded fixture simultaneously crosses the former
@@ -235,6 +258,8 @@ assert h.hexdigest()==s[10]
 source=pathlib.Path(sys.argv[2]).read_text(encoding='utf-8')
 assert 'file_bytes>MAX_TOTAL_BYTES-s->hashed_bytes' in source
 assert 's->hashed_bytes+file_bytes>MAX_TOTAL_BYTES' not in source
+assert 'n>=ENTRY_CAP-s->entries' not in source
+assert 'if(n>=ENTRY_CAP)' in source
 PY
 rm -rf "$CAPACITY_ROOT"
 
