@@ -26,7 +26,7 @@ case "${1:-}" in
     ;;
   capture-verify)
     [[ $# -eq 3&&"${2:-}" == --artifact&&"${3:-}" == /* ]]||fail 'invalid capture-verify invocation'
-    signed "$3"||fail 'capture signature invalid';PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$MODEL" capture-verify "$3"
+    signed "$3"||fail 'capture signature invalid';PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$MODEL" capture-verify "$3" "$COMMIT" "$VERSION"
     ;;
   create)
     [[ $# -eq 9&&"${2:-}" == --capture&&"${4:-}" == --provenance&&"${6:-}" == --generated-at&&"${8:-}" == --output ]]||fail 'invalid create invocation'
@@ -40,7 +40,7 @@ case "${1:-}" in
     ;;
   verify)
     [[ $# -eq 3&&"${2:-}" == --artifact&&"${3:-}" == /* ]]||fail 'invalid verify invocation'
-    signed "$3"||fail 'surface signature invalid';PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$MODEL" verify "$3"
+    signed "$3"||fail 'surface signature invalid';PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$MODEL" verify "$3" "$COMMIT" "$VERSION"
     ;;
   *)fail 'usage: wapp-read-only-security-surface capture-create|capture-verify|create|verify';;
 esac

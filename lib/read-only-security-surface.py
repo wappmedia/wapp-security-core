@@ -11,7 +11,7 @@ import pathlib
 import re
 import stat
 import sys
-from typing import Any
+from typing import Any, Optional
 
 
 HEX = re.compile(r"^(?:[a-f0-9]{2})*$")
@@ -277,7 +277,7 @@ def capture_derive(rows_path: pathlib.Path, observed_at: str, expires_at: str, n
     }
 
 
-def capture_verify(value: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+def capture_verify(value: dict[str, Any], current_commit: Optional[str] = None, current_version: Optional[str] = None, *, require_current: bool = False) -> tuple[dict[str, Any], dict[str, Any]]:
     expected_keys = {"tool", "schema", "contract", "classification_scope", "observed_at", "expires_at", "capture_nonce", "public_core", "root_path_hex", "physical_root_hex", "root_identity", "runtime_mode", "runtime_path_hex", "helper_sha256", "runtime_identity_sha256", "inventory_rows", "inventory_commitment_sha256", "entry_count", "unresolved_count", "uncovered_path_count", "coverage_complete", "authority"}
     exact_keys(value, expected_keys, "capture")
     if value["tool"] != "wapp-security-native-inventory-capture-binding" or value["schema"] != 1 or value["contract"] != "COMPLETE_BOUNDED_DESCRIPTOR_NOFOLLOW_TWO_PASS_V1" or value["classification_scope"] != "INVENTORY_ONLY_NO_DISPOSITION_V1":
@@ -286,9 +286,18 @@ def capture_verify(value: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any
         fail("capture authority invalid")
     rows_path, rows_raw = validate_reference(value["inventory_rows"], "capture inventory")
     public = exact_keys(value["public_core"], {"commit", "version"}, "capture public_core")
+    if current_commit is not None or current_version is not None:
+        validate_release(str(current_commit), str(current_version))
+        if public != {"commit": current_commit, "version": current_version}:
+            fail("cross-release capture substitution")
     expected = capture_derive(rows_path, value["observed_at"], value["expires_at"], value["capture_nonce"], public["commit"], public["version"])
     if canonical(value) != canonical(expected):
         fail("capture derivation mismatch")
+    if require_current:
+        now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+        observed, expires = timestamp(value["observed_at"], "capture observation"), timestamp(value["expires_at"], "capture expiry")
+        if now < observed - dt.timedelta(seconds=60) or now > expires:
+            fail("capture is not current")
     return expected, parse_inventory(rows_raw)
 
 
@@ -391,10 +400,13 @@ def classify(entry: dict[str, Any], path_hex: str, rule: dict[str, Any], record:
 def surface_derive(capture_path: pathlib.Path, provenance_path: pathlib.Path, ruleset_path: pathlib.Path, generated_at: str, current_commit: str, current_version: str) -> dict[str, Any]:
     validate_release(current_commit, current_version)
     capture_value, capture_raw = load(capture_path)
-    capture, inventory = capture_verify(capture_value)
+    capture, inventory = capture_verify(capture_value, current_commit, current_version, require_current=True)
     if capture["public_core"] != {"commit": current_commit, "version": current_version}:
         fail("cross-release capture substitution")
     generated = timestamp(generated_at, "surface timestamp")
+    now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    if generated < now - dt.timedelta(minutes=10) or generated > now + dt.timedelta(seconds=60):
+        fail("surface issue timestamp is not current")
     observed, capture_expiry = timestamp(capture["observed_at"], "capture observation"), timestamp(capture["expires_at"], "capture expiry")
     if generated < observed or generated > capture_expiry:
         fail("surface currentness invalid")
@@ -455,16 +467,22 @@ def surface_derive(capture_path: pathlib.Path, provenance_path: pathlib.Path, ru
     }
 
 
-def surface_verify(value: dict[str, Any]) -> dict[str, Any]:
+def surface_verify(value: dict[str, Any], current_commit: str, current_version: str) -> dict[str, Any]:
     if value.get("tool") != "wapp-security-read-only-security-surface" or value.get("schema") != 1:
         fail("surface type invalid")
     public = exact_keys(value.get("public_core"), {"commit", "version"}, "surface public_core")
+    validate_release(current_commit, current_version)
+    if public != {"commit": current_commit, "version": current_version}:
+        fail("cross-release surface substitution")
     capture_path, _ = validate_reference(value.get("capture"), "surface capture")
     provenance_path, _ = validate_reference(value.get("provenance"), "surface provenance")
     ruleset_path, _ = validate_reference(value.get("ruleset"), "surface ruleset")
     expected = surface_derive(capture_path, provenance_path, ruleset_path, str(value.get("generated_at", "")), public["commit"], public["version"])
     if canonical(value) != canonical(expected):
         fail("surface derivation mismatch")
+    now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    if now > timestamp(value["expires_at"], "surface expiry"):
+        fail("surface is stale")
     return expected
 
 
@@ -493,14 +511,14 @@ def main() -> int:
             rows, observed, expires, nonce, commit, version, output = sys.argv[2:]
             write_exclusive(pathlib.Path(output), canonical(capture_derive(pathlib.Path(rows), observed, expires, nonce, commit, version)))
             return 0
-        if len(sys.argv) == 3 and sys.argv[1] == "capture-verify":
-            value, _ = load(pathlib.Path(sys.argv[2])); capture_verify(value); print("READ_ONLY_NATIVE_CAPTURE_BINDING: VERIFIED_NON_AUTHORIZING"); return 0
+        if len(sys.argv) == 5 and sys.argv[1] == "capture-verify":
+            value, _ = load(pathlib.Path(sys.argv[2])); capture_verify(value, sys.argv[3], sys.argv[4], require_current=True); print("READ_ONLY_NATIVE_CAPTURE_BINDING: VERIFIED_NON_AUTHORIZING"); return 0
         if len(sys.argv) == 9 and sys.argv[1] == "create":
             capture, provenance_path, ruleset_path, generated, commit, version, output = sys.argv[2:]
             write_exclusive(pathlib.Path(output), canonical(surface_derive(pathlib.Path(capture), pathlib.Path(provenance_path), pathlib.Path(ruleset_path), generated, commit, version)))
             return 0
-        if len(sys.argv) == 3 and sys.argv[1] == "verify":
-            value, _ = load(pathlib.Path(sys.argv[2])); verified = surface_verify(value); print(f"READ_ONLY_SECURITY_SURFACE_V1: {verified['state']}"); return 0
+        if len(sys.argv) == 5 and sys.argv[1] == "verify":
+            value, _ = load(pathlib.Path(sys.argv[2])); verified = surface_verify(value, sys.argv[3], sys.argv[4]); print(f"READ_ONLY_SECURITY_SURFACE_V1: {verified['state']}"); return 0
         fail("usage")
     except Invalid as error:
         print(f"read-only-security-surface: {error}", file=sys.stderr)
