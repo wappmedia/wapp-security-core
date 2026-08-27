@@ -6,17 +6,17 @@ cd "$ROOT"
 
 /bin/bash -n wapp bin/wapp bin/wapp-closure-check bin/wapp-emergency-clean \
   bin/wapp-package-audit bin/wapp-plugin-policy bin/wapp-product-seal bin/wapp-public-data-boundary \
-  bin/wapp-release-check bin/wapp-signed-drift-diagnostic bin/wapp-volatile-runtime-disposition bin/wapp-test lib/recovery-integrity.sh lib/native-displaced-inventory-loader.sh \
+  bin/wapp-read-only-security-surface bin/wapp-release-check bin/wapp-signed-drift-diagnostic bin/wapp-volatile-runtime-disposition bin/wapp-test lib/recovery-integrity.sh lib/native-displaced-inventory-loader.sh \
   lib/native-displaced-inventory-ephemeral-loader.sh native/build-displaced-inventory-helper.sh \
   native/build-ephemeral-memfd-launcher.sh tests/test-emergency-operator-v1.sh tests/test-external-reviewer-trust.sh \
   tests/test-file-manager-for-work-policy.sh tests/test-native-displaced-inventory-helper.sh \
-  tests/test-native-displaced-inventory-reproducible-build.sh tests/test-native-drift-diagnostic.sh tests/test-native-drift-diagnostic-memory.sh tests/test-volatile-runtime-disposition.sh tests/test-native-ephemeral-bootstrap.sh tests/test-public-data-boundary.sh \
+  tests/test-native-displaced-inventory-reproducible-build.sh tests/test-native-drift-diagnostic.sh tests/test-native-drift-diagnostic-memory.sh tests/test-volatile-runtime-disposition.sh tests/test-read-only-security-surface.sh tests/test-native-ephemeral-bootstrap.sh tests/test-public-data-boundary.sh \
   lib/native-exact-file-quarantine-ephemeral-loader.sh native/build-exact-file-quarantine-helper.sh \
   native/build-exact-file-quarantine-ephemeral-memfd-launcher.sh tests/test-native-exact-file-quarantine-helper.sh \
   tests/test-native-exact-file-quarantine-reproducible-build.sh tests/test-native-exact-file-quarantine-ephemeral-bootstrap.sh
 python3 - <<'PY'
 from pathlib import Path
-for name in ("lib/emergency-operator-v1.py", "lib/native-drift-diagnostic.py", "lib/volatile-runtime-disposition.py", "lib/plugin-policy.py", "tests/public-data-boundary.py"):
+for name in ("lib/emergency-operator-v1.py", "lib/native-drift-diagnostic.py", "lib/volatile-runtime-disposition.py", "lib/plugin-policy.py", "lib/read-only-security-surface.py", "tests/public-data-boundary.py"):
     compile(Path(name).read_text(encoding="utf-8"), name, "exec")
 PY
 /bin/bash tests/test-emergency-operator-v1.sh
@@ -27,6 +27,7 @@ PY
 /bin/bash tests/test-native-drift-diagnostic.sh
 /bin/bash tests/test-native-drift-diagnostic-memory.sh
 /bin/bash tests/test-volatile-runtime-disposition.sh
+/bin/bash tests/test-read-only-security-surface.sh
 /bin/bash tests/test-native-ephemeral-bootstrap.sh
 /bin/bash tests/test-native-exact-file-quarantine-helper.sh
 /bin/bash tests/test-native-exact-file-quarantine-reproducible-build.sh

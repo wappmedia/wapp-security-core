@@ -17,6 +17,7 @@ Usage:
   wapp plugin-policy RECORD.json
   wapp signed-drift-diagnostic create|verify ...
   wapp volatile-runtime-disposition create|verify|policy-token ...
+  wapp read-only-security-surface capture-create|capture-verify|create|verify ...
   wapp product-seal [OUTPUT]
   wapp test
   wapp release-check
@@ -33,6 +34,7 @@ case "$COMMAND" in
   plugin-policy) exec /bin/bash "$SCRIPT_DIR/wapp-plugin-policy" "$@" ;;
   signed-drift-diagnostic) exec /bin/bash "$SCRIPT_DIR/wapp-signed-drift-diagnostic" "$@" ;;
   volatile-runtime-disposition) exec /bin/bash "$SCRIPT_DIR/wapp-volatile-runtime-disposition" "$@" ;;
+  read-only-security-surface) exec /bin/bash "$SCRIPT_DIR/wapp-read-only-security-surface" "$@" ;;
   product-seal) exec /bin/bash "$SCRIPT_DIR/wapp-product-seal" "$@" ;;
   test) exec /bin/bash "$SCRIPT_DIR/wapp-test" "$@" ;;
   release-check) exec /bin/bash "$SCRIPT_DIR/wapp-release-check" "$@" ;;

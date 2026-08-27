@@ -80,6 +80,7 @@ PRODUCT_PATHSPECS = (
     "config/provider-authenticators.json", "config/aws-custody-core.json",
     "config/aws-custody-production-policy.json.example",
     "config/reviewer-trust-anchors.json", "config/native-filesystem-helper.json",
+    "config/read-only-security-surface-ruleset.json",
     "config/native-ephemeral-bootstrap.json",
     "config/native-exact-file-quarantine.json",
     "config/native-exact-file-quarantine-ephemeral-bootstrap.json",

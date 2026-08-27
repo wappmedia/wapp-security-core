@@ -5,14 +5,17 @@ bin/wapp-closure-check
 bin/wapp-emergency-clean
 bin/wapp-plugin-policy
 bin/wapp-product-seal
+bin/wapp-read-only-security-surface
 bin/wapp-signed-drift-diagnostic
 bin/wapp-volatile-runtime-disposition
 lib/emergency-operator-v1.py
 lib/plugin-policy.py
+lib/read-only-security-surface.py
 lib/recovery-integrity.sh
 lib/native-drift-diagnostic.py
 lib/volatile-runtime-disposition.py
 config/reviewer-trust-anchors.json
+config/read-only-security-surface-ruleset.json
 native/displaced-inventory-helper.c
 native/build-displaced-inventory-helper.sh
 lib/native-displaced-inventory-loader.sh

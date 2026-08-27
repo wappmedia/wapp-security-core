@@ -24,12 +24,20 @@ wapp emergency-clean example.test --execute
 wapp emergency-clean example.test --reopen
 wapp closure-check example.test
 wapp plugin-policy plugin-record.json
+wapp read-only-security-surface capture-create|capture-verify|create|verify ...
 ```
 
 The generic runtime supports exact package contracts for file quarantine,
 verified file replacement, sparse `active_plugins` member removal, exact option
 removal, credential-neutral identity quarantine, atomic reopen, recurrence
 failure and closure evaluation.
+
+Version 1.1.14 adds `READ_ONLY_SECURITY_SURFACE_V1`, a deterministic,
+non-authorizing semantic binder over the existing closed-world native
+inventory. Exact signed official/runtime provenance may resolve an applicable
+object; unknown security-relevant content remains unresolved and blocks a
+terminal no-action candidate. See
+[Read-only security surface](docs/READ-ONLY-SECURITY-SURFACE.md).
 
 Version 1.1.9 adds a bounded native Linux backend for deterministic exact-file
 quarantine and exact rollback on hosts without Python. It remains

@@ -9,6 +9,7 @@ bin/wapp-emergency-clean
 bin/wapp-package-audit
 bin/wapp-plugin-policy
 bin/wapp-product-seal
+bin/wapp-read-only-security-surface
 bin/wapp-signed-drift-diagnostic
 bin/wapp-public-data-boundary
 bin/wapp-release-check
@@ -20,13 +21,16 @@ config/native-ephemeral-bootstrap.json
 config/native-exact-file-quarantine-ephemeral-bootstrap.json
 config/native-exact-file-quarantine.json
 config/public-source-allowlist.txt
+config/read-only-security-surface-ruleset.json
 config/reviewer-trust-anchors.json
 docs/EMERGENCY-OPERATOR-MODE-V1.md
 docs/FILE-MANAGER-FOR-WORK-POLICY.md
 docs/NATIVE-FILESYSTEM-EVIDENCE-HELPER.md
 docs/NATIVE-EXACT-FILE-QUARANTINE.md
+docs/READ-ONLY-SECURITY-SURFACE.md
 lib/emergency-operator-v1.py
 lib/plugin-policy.py
+lib/read-only-security-surface.py
 lib/recovery-integrity.sh
 lib/volatile-runtime-disposition.py
 lib/native-displaced-inventory-loader.sh
@@ -59,5 +63,6 @@ tests/test-native-exact-file-quarantine-ephemeral-bootstrap.sh
 tests/test-native-exact-file-quarantine-helper.sh
 tests/test-native-exact-file-quarantine-reproducible-build.sh
 tests/test-public-data-boundary.sh
+tests/test-read-only-security-surface.sh
 tests/test-volatile-runtime-disposition.sh
 wapp
