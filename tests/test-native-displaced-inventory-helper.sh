@@ -112,11 +112,15 @@ cat >"$TMP/create-volatile-memory-tree.c" <<'C'
 #include <string.h>
 #include <unistd.h>
 int main(int argc,char **argv){
-  if(argc!=2)return 64;int root=open(argv[1],O_RDONLY|O_DIRECTORY|O_CLOEXEC);if(root<0)return 65;
+  if(argc!=2)return 64;
+  int root=open(argv[1],O_RDONLY|O_DIRECTORY|O_CLOEXEC);
+  if(root<0)return 65;
   char name[96];for(unsigned index=0;index<140000;index++){
-    int n=snprintf(name,sizeof name,"p%06u-%072d",index,0);if(n!=80)return 66;
+    int n=snprintf(name,sizeof name,"p%06u-%072d",index,0);
+    if(n!=80)return 66;
     int fd=openat(root,name,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);
-    if(fd<0){fprintf(stderr,"create %u: %s\n",index,strerror(errno));return 67;}if(close(fd))return 68;
+    if(fd<0){fprintf(stderr,"create %u: %s\n",index,strerror(errno));return 67;}
+    if(close(fd))return 68;
   }
   return close(root)?69:0;
 }
