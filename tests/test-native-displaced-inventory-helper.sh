@@ -117,7 +117,11 @@ int main(int argc,char **argv){
   emit_volatile_inventory("/tmp",first,second,argv[3],argv[4]);free(first);free(second);return 0;
 }
 C
-cc -O2 -std=gnu11 -Wall -Wextra -Werror -I"$ROOT/native" "$TMP/volatile-memory-harness.c" -o "$TMP/volatile-memory-harness"
+# GCC diagnoses the helper's intentionally compact, generator-stable source as
+# misleading indentation when it is textually included by this test harness.
+# Keep all other warnings fatal; this regression exercises the bounded-memory
+# behavior, while the release helper itself is built and verified by Zig/Clang.
+cc -O2 -std=gnu11 -Wall -Wextra -Werror -Wno-error=misleading-indentation -I"$ROOT/native" "$TMP/volatile-memory-harness.c" -o "$TMP/volatile-memory-harness"
 /usr/bin/python3 - "$TMP/volatile-first.tsv" "$TMP/volatile-second.tsv" "$TMP/volatile-policy.txt" <<'PY'
 import pathlib,shutil,sys
 first,second,policy=map(pathlib.Path,sys.argv[1:])
