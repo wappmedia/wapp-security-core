@@ -106,7 +106,10 @@ typedef struct {
 static void die(const char *m){fprintf(stderr,"wapp-native-displaced-inventory: %s\n",m);exit(20);}
 static void alarm_exit(int unused){
   static const char message[]="wapp-native-displaced-inventory: hard time cap exceeded\n";
-  (void)unused;(void)write(STDERR_FILENO,message,sizeof(message)-1);_exit(124);
+  (void)unused;
+  ssize_t written=write(STDERR_FILENO,message,sizeof(message)-1);
+  (void)written;
+  _exit(124);
 }
 static void apply_process_limits(void){struct rlimit memory={256ULL*1024ULL*1024ULL,256ULL*1024ULL*1024ULL},cpu={MAX_SECONDS+5,MAX_SECONDS+5},files={64,64};if(setrlimit(RLIMIT_AS,&memory)<0||setrlimit(RLIMIT_CPU,&cpu)<0||setrlimit(RLIMIT_NOFILE,&files)<0)die("process limits unavailable");signal(SIGALRM,alarm_exit);alarm(MAX_SECONDS);}
 static void *xmalloc(size_t n){void *p=malloc(n?n:1);if(!p)die("memory cap/allocation failure");return p;}
@@ -162,18 +165,21 @@ static char *symlink_target(Snapshot *s,int parent,const char *name,const unsign
   int fd=openat(parent,name,O_PATH|O_NOFOLLOW|O_CLOEXEC);if(fd<0){issue(s,"SYMLINK_TARGET_READ_UNRESOLVED",rel,rn,"open");return strdup("-");}struct stat opened,after,pathst;struct statfs fs;if(fstat(fd,&opened)<0||!same_stat(&opened,before)){close(fd);issue(s,"SYMLINK_IDENTITY_RACE",rel,rn,"open");return strdup("-");}if(fstatfs(fd,&fs)<0||!(fs.f_flags&(ST_RDONLY|ST_NOATIME))){close(fd);issue(s,"SYMLINK_TARGET_NOATIME_UNRESOLVED",rel,rn,"mount-flags");return strdup("-");}char buf[4097];ssize_t n=readlinkat(fd,"",buf,sizeof(buf)-1);if(n<0||n>4096){close(fd);issue(s,"SYMLINK_TARGET_READ_UNRESOLVED",rel,rn,"readlink");return strdup("-");}if(fstat(fd,&after)<0||fstatat(parent,name,&pathst,AT_SYMLINK_NOFOLLOW)<0||!same_stat(&opened,&after)||!same_stat(&after,&pathst)){close(fd);issue(s,"SYMLINK_IDENTITY_RACE",rel,rn,"readlink");return strdup("-");}close(fd);return hex_bytes((unsigned char*)buf,(size_t)n);
 }
 static void walk(Snapshot *s,int fd,const unsigned char *absolute,size_t an,const unsigned char *rel,size_t rn,int depth,const struct stat *before,int parent,const char *name){
-  if(s->stopped)return;check_deadline(s);if(s->entries>=ENTRY_CAP){issue(s,"ENTRY_CAP",rel,rn,"entries");s->stopped=1;return;}s->entries++;const char *type=kind(before->st_mode);int uploads=has_uploads_component(rel,rn);if(uploads)s->uploads++;if(S_ISDIR(before->st_mode))s->dirs_n++;else if(S_ISREG(before->st_mode))s->files++;else s->other++;
+  if(s->stopped)return;
+  check_deadline(s);if(s->entries>=ENTRY_CAP){issue(s,"ENTRY_CAP",rel,rn,"entries");s->stopped=1;return;}s->entries++;const char *type=kind(before->st_mode);int uploads=has_uploads_component(rel,rn);if(uploads)s->uploads++;if(S_ISDIR(before->st_mode))s->dirs_n++;else if(S_ISREG(before->st_mode))s->files++;else s->other++;
   char *target=strdup("-"),*filehash=strdup("-");if(!target||!filehash)die("allocation");
   if(S_ISLNK(before->st_mode)){free(target);target=symlink_target(s,parent,name,rel,rn,before);issue(s,"SYMLINK_UNRESOLVED",rel,rn,"no-follow");}
   else if(S_ISREG(before->st_mode)){if(before->st_nlink!=1)issue(s,"HARDLINK_UNRESOLVED",rel,rn,"nlink");if(s->files>FILE_CAP){issue(s,"FILE_CAP",rel,rn,"files");s->stopped=1;}if(!s->stopped){free(filehash);filehash=hash_regular(s,parent,name,rel,rn,before);}}
   else if(!S_ISDIR(before->st_mode))issue(s,"NONREGULAR_OBJECT_UNRESOLVED",rel,rn,type);
   char *rh=hex_bytes(rel,rn),*ah=hex_bytes(absolute,an);lines_add(&s->rows,fmt_alloc("ENTRY\t%s\t%s\t%s\t%lld\t%03o\t%u\t%u\t%lld\t%lld\t%llu\t%llu\t%llu\t%s\t%s\t%d",rh,ah,type,(long long)before->st_size,(unsigned)(before->st_mode&07777),(unsigned)before->st_uid,(unsigned)before->st_gid,ns_time(before->st_mtim),ns_time(before->st_ctim),(unsigned long long)before->st_dev,(unsigned long long)before->st_ino,(unsigned long long)before->st_nlink,target,filehash,uploads));free(rh);free(ah);free(target);free(filehash);
-  if(!S_ISDIR(before->st_mode)||s->stopped)return;if(depth>DEPTH_CAP){issue(s,"DEPTH_CAP",rel,rn,"depth");return;}if(s->dirs_n>DIRECTORY_CAP){issue(s,"DIRECTORY_CAP",rel,rn,"dirs");s->stopped=1;return;}if(id_seen(s,before->st_dev,before->st_ino)){issue(s,"DIRECTORY_IDENTITY_REPEAT",rel,rn,"identity");return;}id_add(s,before->st_dev,before->st_ino);
+  if(!S_ISDIR(before->st_mode)||s->stopped)return;
+  if(depth>DEPTH_CAP){issue(s,"DEPTH_CAP",rel,rn,"depth");return;}if(s->dirs_n>DIRECTORY_CAP){issue(s,"DIRECTORY_CAP",rel,rn,"dirs");s->stopped=1;return;}if(id_seen(s,before->st_dev,before->st_ino)){issue(s,"DIRECTORY_IDENTITY_REPEAT",rel,rn,"identity");return;}id_add(s,before->st_dev,before->st_ino);
   Bytes *first=NULL,*last=NULL;size_t fn=0,ln=0;if(read_names(s,fd,rel,rn,&first,&fn)<0)return;
   for(size_t i=0;i<fn&&!s->stopped;i++){size_t crn,can;char *cr=join_bytes(rel,rn,first[i].v,first[i].n,rn>0,&crn);char *ca=join_bytes(absolute,an,first[i].v,first[i].n,1,&can);if(crn>MAX_RELATIVE_BYTES){issue(s,"PATH_BYTE_CAP",(unsigned char*)cr,crn,"path");free(cr);free(ca);continue;}char nm[4097];if(first[i].n>=sizeof nm)die("name cap");memcpy(nm,first[i].v,first[i].n);nm[first[i].n]=0;struct stat child,final;if(fstatat(fd,nm,&child,AT_SYMLINK_NOFOLLOW)<0){issue(s,"ENTRY_STAT_UNRESOLVED",(unsigned char*)cr,crn,"stat");free(cr);free(ca);continue;}int cfd=-1;if(S_ISDIR(child.st_mode)){int used=0;cfd=open_component(fd,nm,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_NOATIME|O_CLOEXEC,&used);if(cfd<0){issue(s,"DIRECTORY_OPEN_UNRESOLVED",(unsigned char*)cr,crn,"open");free(cr);free(ca);continue;}struct stat op;if(fstat(cfd,&op)<0||!same_stat(&op,&child)){close(cfd);issue(s,"DIRECTORY_IDENTITY_RACE",(unsigned char*)cr,crn,"open");free(cr);free(ca);continue;}}
     walk(s,cfd,(unsigned char*)ca,can,(unsigned char*)cr,crn,depth+1,&child,fd,nm);if(cfd>=0)close(cfd);if(fstatat(fd,nm,&final,AT_SYMLINK_NOFOLLOW)<0)issue(s,"ENTRY_FINAL_RACE",(unsigned char*)cr,crn,"stat");else if(!same_stat(&child,&final))issue(s,"ENTRY_IDENTITY_RACE",(unsigned char*)cr,crn,"changed");free(cr);free(ca);
   }
-  if(!s->stopped&&read_names(s,fd,rel,rn,&last,&ln)==0&&!names_equal(first,fn,last,ln))issue(s,"DIRECTORY_IDENTITY_RACE",rel,rn,"changed");names_free(first,fn);names_free(last,ln);
+  if(!s->stopped&&read_names(s,fd,rel,rn,&last,&ln)==0&&!names_equal(first,fn,last,ln))issue(s,"DIRECTORY_IDENTITY_RACE",rel,rn,"changed");
+  names_free(first,fn);names_free(last,ln);
 }
 static char *snapshot(const char *root,const char *runtime_sha,const char *runtime_identity){
   Snapshot s={0};s.deadline=time(NULL)+MAX_SECONDS;s.requested_root=root;s.runtime_sha=runtime_sha;s.runtime_identity=runtime_identity;int used=0,fd=open_root(root,&used);struct stat rb,rp,ra;if(fstat(fd,&rb)<0||lstat(root,&rp)<0||!same_stat(&rb,&rp)||!S_ISDIR(rb.st_mode)){close(fd);die("physical root identity mismatch");}walk(&s,fd,(const unsigned char*)root,strlen(root),(const unsigned char*)"",0,0,&rb,-1,NULL);if(fstat(fd,&ra)<0||lstat(root,&rp)<0||!same_stat(&rb,&ra)||!same_stat(&ra,&rp))issue(&s,"ROOT_IDENTITY_RACE",(unsigned char*)"",0,"changed");close(fd);
@@ -188,7 +194,8 @@ static char *snapshot(const char *root,const char *runtime_sha,const char *runti
 }
 static size_t split_tabs(char *line,char **field,size_t cap){
   size_t n=0;char *p=line;
-  if(!cap)return 0;field[n++]=p;
+  if(!cap)return 0;
+  field[n++]=p;
   while(*p){if(*p=='\t'){*p=0;if(n>=cap)return cap+1;field[n++]=p+1;}p++;}
   return n;
 }
@@ -206,22 +213,26 @@ static int canonical_relhex(const char *text){
 static int diagnostic_line_next(const char **cursor,const char **line,size_t *length){
   while(**cursor){
     const char *start=*cursor,*end=strchr(start,'\n');size_t n=end?(size_t)(end-start):strlen(start);*cursor=end?end+1:start+n;
-    if(!n)continue;*line=start;*length=n;return 1;
+    if(!n)continue;
+    *line=start;*length=n;return 1;
   }
   return 0;
 }
 static int diagnostic_prefix(const char *line,size_t length,const char *prefix){size_t n=strlen(prefix);return length>=n&&!memcmp(line,prefix,n);}
 static void diagnostic_record_copy(DiagnosticRecord *record,const char *line,size_t length){
-  if(length>=sizeof record->storage)die("diagnostic line cap");memcpy(record->storage,line,length);record->storage[length]=0;memset(record->field,0,sizeof record->field);
+  if(length>=sizeof record->storage)die("diagnostic line cap");
+  memcpy(record->storage,line,length);record->storage[length]=0;memset(record->field,0,sizeof record->field);
 }
 static void parse_diagnostic_bindings(const char *snapshot_text,char root[11][8193],char runtime[5][1025]){
   const char *cursor=snapshot_text,*line;size_t length;int root_seen=0,runtime_seen=0;DiagnosticRecord record;
   while(diagnostic_line_next(&cursor,&line,&length)){
     if(diagnostic_prefix(line,length,"ROOT\t")){
-      if(root_seen++)die("diagnostic duplicate root");diagnostic_record_copy(&record,line,length);if(split_tabs(record.storage,record.field,11)!=11)die("diagnostic root invalid");
+      if(root_seen++)die("diagnostic duplicate root");
+      diagnostic_record_copy(&record,line,length);if(split_tabs(record.storage,record.field,11)!=11)die("diagnostic root invalid");
       for(size_t i=0;i<11;i++){if(strlen(record.field[i])>=8193)die("diagnostic root field cap");strcpy(root[i],record.field[i]);}
     }else if(diagnostic_prefix(line,length,"RUNTIME\t")){
-      if(runtime_seen++)die("diagnostic duplicate runtime");diagnostic_record_copy(&record,line,length);if(split_tabs(record.storage,record.field,5)!=5)die("diagnostic runtime invalid");
+      if(runtime_seen++)die("diagnostic duplicate runtime");
+      diagnostic_record_copy(&record,line,length);if(split_tabs(record.storage,record.field,5)!=5)die("diagnostic runtime invalid");
       for(size_t i=0;i<5;i++){if(strlen(record.field[i])>=1025)die("diagnostic runtime field cap");strcpy(runtime[i],record.field[i]);}
     }
   }
@@ -230,26 +241,31 @@ static void parse_diagnostic_bindings(const char *snapshot_text,char root[11][81
 static int diagnostic_entry_next(DiagnosticCursor *cursor,DiagnosticRecord *record){
   const char *line;size_t length;
   while(diagnostic_line_next(&cursor->cursor,&line,&length))if(diagnostic_prefix(line,length,"ENTRY\t")){
-    if(cursor->count>=ENTRY_CAP)die("diagnostic entry cap");diagnostic_record_copy(record,line,length);
+    if(cursor->count>=ENTRY_CAP)die("diagnostic entry cap");
+    diagnostic_record_copy(record,line,length);
     if(split_tabs(record->storage,record->field,16)!=16||strcmp(record->field[0],"ENTRY")||!canonical_relhex(record->field[1]))die("diagnostic source entry invalid");
     if(cursor->count&&strcmp(cursor->previous,record->field[1])>=0)die("diagnostic source ordering invalid");
-    if(strlen(record->field[1])>=sizeof cursor->previous)die("diagnostic entry path cap");strcpy(cursor->previous,record->field[1]);cursor->count++;return 1;
+    if(strlen(record->field[1])>=sizeof cursor->previous)die("diagnostic entry path cap");
+    strcpy(cursor->previous,record->field[1]);cursor->count++;return 1;
   }
   return 0;
 }
 static int diagnostic_issue_next(DiagnosticCursor *cursor,DiagnosticRecord *record){
   const char *line;size_t length;
   while(diagnostic_line_next(&cursor->cursor,&line,&length))if(diagnostic_prefix(line,length,"UNRESOLVED\t")){
-    if(cursor->count>=ENTRY_CAP)die("diagnostic issue cap");diagnostic_record_copy(record,line,length);
+    if(cursor->count>=ENTRY_CAP)die("diagnostic issue cap");
+    diagnostic_record_copy(record,line,length);
     if(cursor->count&&strcmp(cursor->previous,record->storage)>=0)die("diagnostic issue ordering invalid");
-    if(strlen(record->storage)>=sizeof cursor->previous)die("diagnostic issue line cap");strcpy(cursor->previous,record->storage);
+    if(strlen(record->storage)>=sizeof cursor->previous)die("diagnostic issue line cap");
+    strcpy(cursor->previous,record->storage);
     if(split_tabs(record->storage,record->field,4)!=4||strcmp(record->field[0],"UNRESOLVED")||!canonical_relhex(record->field[2])||!valid_sha(record->field[3]))die("diagnostic source issue invalid");
     cursor->count++;return 1;
   }
   return 0;
 }
 static const char *diagnostic_change(const DiagnosticEntry *first,const DiagnosticEntry *second){
-  if(!first)return "CREATED";if(!second)return "DELETED";
+  if(!first)return "CREATED";
+  if(!second)return "DELETED";
   if(strcmp(first->field[3],second->field[3])||strcmp(first->field[10],second->field[10])||strcmp(first->field[11],second->field[11]))return "REPLACED";
   return "MODIFIED";
 }
@@ -277,7 +293,8 @@ static int monotonic_log_growth(const DiagnosticEntry *a,const DiagnosticEntry *
   return exact_unsigned(b->field[4],"volatile size invalid")>exact_unsigned(a->field[4],"volatile size invalid")&&exact_signed(b->field[8],"volatile mtime invalid")>=exact_signed(a->field[8],"volatile mtime invalid")&&exact_signed(b->field[9],"volatile ctime invalid")>=exact_signed(a->field[9],"volatile ctime invalid");
 }
 static void verify_log_prefix(const char *root,const DiagnosticEntry *a,const DiagnosticEntry *b,const char *uploads){
-  if(strcmp(a->field[15],uploads)||strcmp(b->field[15],uploads))die("volatile log location marker invalid");size_t rn=0;unsigned char *rel=decode_hex(a->field[1],&rn);if(!rel)die("volatile log path invalid");
+  if(strcmp(a->field[15],uploads)||strcmp(b->field[15],uploads))die("volatile log location marker invalid");
+  size_t rn=0;unsigned char *rel=decode_hex(a->field[1],&rn);if(!rel)die("volatile log path invalid");
   int used=0,rootfd=open_root(root,&used),parent=rootfd;struct stat root_before,root_after;if(fstat(rootfd,&root_before)<0)die("volatile upload root identity unavailable");size_t start=0;char name[4097]={0};
   for(size_t i=0;i<=rn;i++)if(i==rn||rel[i]=='/'){size_t n=i-start;if(!is_safe_component(rel+start,n)||n>=sizeof name)die("volatile upload path component invalid");memcpy(name,rel+start,n);name[n]=0;if(i<rn){int next=open_component(parent,name,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_NOATIME|O_CLOEXEC,&used);if(next<0)die("volatile upload parent traversal failed");if(parent!=rootfd)close(parent);parent=next;}start=i+1;}
   int fd=open_component(parent,name,O_RDONLY|O_NOFOLLOW|O_NOATIME|O_CLOEXEC,&used);struct stat opened,after,pathst;if(fd<0||fstat(fd,&opened)<0||!S_ISREG(opened.st_mode)||opened.st_dev!=(dev_t)exact_unsigned(b->field[10],"volatile upload device invalid")||opened.st_ino!=(ino_t)exact_unsigned(b->field[11],"volatile upload inode invalid")||(unsigned)(opened.st_mode&07777)!=exact_octal(b->field[5],"volatile upload mode invalid")||(opened.st_mode&0111)||opened.st_uid!=(uid_t)exact_unsigned(b->field[6],"volatile upload uid invalid")||opened.st_gid!=(gid_t)exact_unsigned(b->field[7],"volatile upload gid invalid")||opened.st_nlink!=(nlink_t)exact_unsigned(b->field[12],"volatile upload nlink invalid")||(unsigned long long)opened.st_size!=exact_unsigned(b->field[4],"volatile upload size invalid")||ns_time(opened.st_mtim)!=exact_signed(b->field[8],"volatile upload mtime invalid")||ns_time(opened.st_ctim)!=exact_signed(b->field[9],"volatile upload ctime invalid"))die("volatile upload current identity mismatch");
@@ -290,17 +307,20 @@ static void emit_volatile_inventory(const char *root,const char *first_text,cons
   parse_diagnostic_bindings(first_text,root1,runtime1);parse_diagnostic_bindings(second_text,root2,runtime2);parse_volatile_policy(policy_token,&policy);
   if(strcmp(root1[1],root2[1])||strcmp(root1[3],root2[3])||strcmp(root1[4],root2[4])||strcmp(runtime1[1],runtime2[1])||strcmp(runtime1[2],runtime2[2])||strcmp(runtime1[3],runtime2[3])||strcmp(runtime1[4],runtime2[4]))die("volatile inventory identity mismatch");
   DiagnosticCursor first_issues={.cursor=first_text},second_issues={.cursor=second_text};DiagnosticRecord first_issue,second_issue;size_t first_issue_count=0,second_issue_count=0;
-  while(diagnostic_issue_next(&first_issues,&first_issue))first_issue_count++;while(diagnostic_issue_next(&second_issues,&second_issue))second_issue_count++;
+  while(diagnostic_issue_next(&first_issues,&first_issue))first_issue_count++;
+  while(diagnostic_issue_next(&second_issues,&second_issue))second_issue_count++;
   if(first_issue_count||second_issue_count)die("volatile inventory unresolved evidence");
   DiagnosticCursor first_entries={.cursor=first_text},second_entries={.cursor=second_text};DiagnosticRecord first_record,second_record;int have_first=diagnostic_entry_next(&first_entries,&first_record),have_second=diagnostic_entry_next(&second_entries,&second_record);
   while(have_first||have_second){DiagnosticEntry a={.storage=first_record.storage},b={.storage=second_record.storage};if(have_first)memcpy(a.field,first_record.field,sizeof a.field);if(have_second)memcpy(b.field,second_record.field,sizeof b.field);int order=have_first&&have_second?strcmp(a.field[1],b.field[1]):(have_first?-1:1);
-    if(order!=0)die("volatile inventory create/delete event");VolatileRule *rule=volatile_rule(&policy,a.field[1]);if(rule)rule->present=1;if(!diagnostic_entry_equal(&a,&b)){if(!rule)die("volatile inventory unclassified drift");if(rule->behavior=='C'&&(!ctime_only(&a,&b)||(exact_octal(a.field[5],"volatile mode invalid")&0111)||(exact_octal(b.field[5],"volatile mode invalid")&0111)))die("volatile inventory behavior mismatch");if(rule->behavior=='L'){if(!monotonic_log_growth(&a,&b))die("volatile log behavior mismatch");verify_log_prefix(root,&a,&b,"0");}if(rule->behavior=='A'){if(!monotonic_log_growth(&a,&b))die("volatile upload behavior mismatch");verify_log_prefix(root,&a,&b,"1");}rule->observed=1;}else if(rule){if(strcmp(a.field[3],"REGULAR")||(exact_octal(a.field[5],"volatile mode invalid")&0111)||(rule->behavior=='A'?strcmp(a.field[15],"1"):strcmp(a.field[15],"0")))die("volatile stable target invalid");rule->observed=0;}have_first=diagnostic_entry_next(&first_entries,&first_record);have_second=diagnostic_entry_next(&second_entries,&second_record);
+    if(order!=0)die("volatile inventory create/delete event");
+    VolatileRule *rule=volatile_rule(&policy,a.field[1]);if(rule)rule->present=1;if(!diagnostic_entry_equal(&a,&b)){if(!rule)die("volatile inventory unclassified drift");if(rule->behavior=='C'&&(!ctime_only(&a,&b)||(exact_octal(a.field[5],"volatile mode invalid")&0111)||(exact_octal(b.field[5],"volatile mode invalid")&0111)))die("volatile inventory behavior mismatch");if(rule->behavior=='L'){if(!monotonic_log_growth(&a,&b))die("volatile log behavior mismatch");verify_log_prefix(root,&a,&b,"0");}if(rule->behavior=='A'){if(!monotonic_log_growth(&a,&b))die("volatile upload behavior mismatch");verify_log_prefix(root,&a,&b,"1");}rule->observed=1;}else if(rule){if(strcmp(a.field[3],"REGULAR")||(exact_octal(a.field[5],"volatile mode invalid")&0111)||(rule->behavior=='A'?strcmp(a.field[15],"1"):strcmp(a.field[15],"0")))die("volatile stable target invalid");rule->observed=0;}have_first=diagnostic_entry_next(&first_entries,&first_record);have_second=diagnostic_entry_next(&second_entries,&second_record);
   }
   for(size_t k=0;k<policy.n;k++)if(!policy.v[k].present)die("volatile policy target missing");
   char token_sha[65];digest(policy_token,strlen(policy_token),token_sha);Lines trailer={0};lines_add(&trailer,fmt_alloc("VOLATILE_RUNTIME_CANDIDATE\tBOUNDED_VOLATILE_RUNTIME_CANDIDATE_V1\t%s\t%zu\tVISIBLE\tUNVERIFIED_NON_AUTHORIZING",token_sha,policy.n));
   for(size_t k=0;k<policy.n;k++)lines_add(&trailer,fmt_alloc("VOLATILE_RUNTIME_CANDIDATE_PATH\t%s\t%s\t%s",policy.v[k].path,policy.v[k].behavior=='C'?"CTIME_ONLY":policy.v[k].behavior=='A'?"APPEND_PREFIX_VERIFIED_UPLOAD_LOG_GROWTH":"APPEND_PREFIX_VERIFIED_LOG_GROWTH",policy.v[k].observed?"OBSERVED_DRIFT":"OBSERVED_STABLE"));
   size_t total=strlen("CAPTURE_NONCE\t")+strlen(nonce)+1+strlen(second_text);for(size_t k=0;k<trailer.n;k++)total+=strlen(trailer.v[k])+1;if(total>MAX_OUTPUT_BYTES)die("volatile inventory serialized output cap");
-  if(printf("CAPTURE_NONCE\t%s\n",nonce)<0||fputs(second_text,stdout)==EOF)die("output write failure");for(size_t k=0;k<trailer.n;k++)if(fputs(trailer.v[k],stdout)==EOF||fputc('\n',stdout)==EOF)die("output write failure");if(fflush(stdout)==EOF)die("output write failure");
+  if(printf("CAPTURE_NONCE\t%s\n",nonce)<0||fputs(second_text,stdout)==EOF)die("output write failure");
+  for(size_t k=0;k<trailer.n;k++)if(fputs(trailer.v[k],stdout)==EOF||fputc('\n',stdout)==EOF)die("output write failure");if(fflush(stdout)==EOF)die("output write failure");
   lines_free(&trailer);free_volatile_policy(&policy);
 }
 static char *diagnostic_delta(const char *first_text,const char *second_text,const char *nonce,const char *helper_sha,const char *runtime_identity){
@@ -315,7 +335,8 @@ static char *diagnostic_delta(const char *first_text,const char *second_text,con
     if(order==0&&diagnostic_entry_equal(&a,&b)){have_first=diagnostic_entry_next(&first_entries,&first_entry);have_second=diagnostic_entry_next(&second_entries,&second_entry);continue;}
     DiagnosticEntry *left=order<=0?&a:NULL,*right=order>=0?&b:NULL;const char *path=left?left->field[1]:right->field[1];
     lines_add(&deltas,fmt_alloc("DRIFT\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s",path,diagnostic_change(left,right),left?"true":"false",right?"true":"false",diagnostic_value(left,3),diagnostic_value(left,10),diagnostic_value(left,11),diagnostic_value(left,4),diagnostic_value(left,5),diagnostic_value(left,6),diagnostic_value(left,7),diagnostic_value(left,12),diagnostic_value(left,8),diagnostic_value(left,9),diagnostic_value(left,14),diagnostic_value(left,13),diagnostic_value(left,15),diagnostic_value(right,3),diagnostic_value(right,10),diagnostic_value(right,11),diagnostic_value(right,4),diagnostic_value(right,5),diagnostic_value(right,6),diagnostic_value(right,7),diagnostic_value(right,12),diagnostic_value(right,8),diagnostic_value(right,9),diagnostic_value(right,14),diagnostic_value(right,13),diagnostic_value(right,15)));
-    if(order<=0)have_first=diagnostic_entry_next(&first_entries,&first_entry);if(order>=0)have_second=diagnostic_entry_next(&second_entries,&second_entry);
+    if(order<=0)have_first=diagnostic_entry_next(&first_entries,&first_entry);
+    if(order>=0)have_second=diagnostic_entry_next(&second_entries,&second_entry);
   }
   Lines issue_deltas={0};DiagnosticCursor first_issues={.cursor=first_text},second_issues={.cursor=second_text};DiagnosticRecord first_issue,second_issue;have_first=diagnostic_issue_next(&first_issues,&first_issue);have_second=diagnostic_issue_next(&second_issues,&second_issue);
   while(have_first||have_second){
@@ -388,7 +409,8 @@ static char *selected_snapshot(const char *root,const char *relhex,const char *r
     start=i+1;
   }
   if(verify_index!=ancestor_count||fstatat(verify_parent,final_name,&verify_stat,AT_SYMLINK_NOFOLLOW)<0||!same_stat(&verify_stat,&after)){if(verify_parent!=verify_root)close(verify_parent);close(verify_root);close(fd);if(parent!=rootfd)close(parent);close(rootfd);free(rel);free(bytes);die("selected canonical target substituted");}
-  if(verify_parent!=verify_root)close(verify_parent);close(verify_root);close(fd);if(parent!=rootfd)close(parent);close(rootfd);
+  if(verify_parent!=verify_root)close(verify_parent);
+  close(verify_root);close(fd);if(parent!=rootfd)close(parent);close(rootfd);
   char file_sha[65],identity_sha[65];digest(bytes,size,file_sha);digest(runtime_identity,strlen(runtime_identity),identity_sha);char *bytehex=hex_bytes(bytes,size),*absolute=fmt_alloc("%s/%s",root,rel),*abshex=hex_bytes((unsigned char*)absolute,strlen(absolute)),*runtimehex=hex_bytes((unsigned char*)RUNTIME_PATH,strlen(RUNTIME_PATH));
   Lines all={0};lines_add(&all,fmt_alloc("ROLLBACK_RUNTIME\t%s\t%s\t%s\t%s",RUNTIME_MODE,runtimehex,runtime_sha,identity_sha));for(size_t i=0;i<path_bindings.n;i++)lines_add(&all,strdup(path_bindings.v[i]));lines_add(&all,fmt_alloc("SELECTED_ROLLBACK\t%s\t%s\t%zu\t%03o\t%u\t%u\t%lld\t%lld\t%llu\t%llu\t%llu\t%s\t%s",relhex,abshex,size,(unsigned)(before.st_mode&07777),(unsigned)before.st_uid,(unsigned)before.st_gid,ns_time(before.st_mtim),ns_time(before.st_ctim),(unsigned long long)before.st_dev,(unsigned long long)before.st_ino,(unsigned long long)before.st_nlink,file_sha,bytehex));
   size_t outn=1;for(size_t i=0;i<all.n;i++)outn+=strlen(all.v[i])+1;char *out=xmalloc(outn),*cursor=out;for(size_t i=0;i<all.n;i++){size_t n=strlen(all.v[i]);memcpy(cursor,all.v[i],n);cursor+=n;*cursor++='\n';}*cursor=0;
