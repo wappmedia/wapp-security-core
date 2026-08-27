@@ -462,10 +462,10 @@ def classify(entry: dict[str, Any], path_hex: str, rule: dict[str, Any], record:
         provenance_value = {key: record[key] for key in ("disposition", "source_kind", "source_identity_sha256")}
         if record["sha256"] != entry["sha256"]:
             rules.append("PROVENANCE_CONTENT_IDENTITY_MISMATCH")
-            result, disposition = "UNRESOLVED", "CONTRADICTORY_PROVENANCE"
+            if result != "ACTION_REQUIRED":
+                result, disposition = "UNRESOLVED", "CONTRADICTORY_PROVENANCE"
         elif result == "ACTION_REQUIRED":
-            rules.append("MALICIOUS_OR_UPLOAD_CONTRADICTS_PROVENANCE")
-            result, disposition = "UNRESOLVED", "CONTRADICTORY_PROVENANCE"
+            rules.append("PROVENANCE_CANNOT_DOWNGRADE_ACTION_REQUIRED")
         else:
             rules.append("EXACT_SIGNED_PROVENANCE_MATCH")
             result, disposition = "PASS", record["disposition"]

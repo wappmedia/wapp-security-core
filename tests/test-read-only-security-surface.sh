@@ -158,6 +158,15 @@ v=json.load(open(sys.argv[1]));assert any('KNOWN_EXACT_PHP_WEBSHELL_V1' in o['ru
 PY
 pass malicious_exact_action_required
 
+make_case malicious-provenance malicious valid
+/usr/bin/python3 - "$TMP/malicious-provenance.surface.json" <<'PY'
+import json,sys
+v=json.load(open(sys.argv[1]));target=[o for o in v['objects'] if 'KNOWN_EXACT_PHP_WEBSHELL_V1' in o['rule_ids']][0]
+assert target['result']=='ACTION_REQUIRED' and target['disposition']=='KNOWN_MALICIOUS_EXACT'
+assert 'PROVENANCE_CANNOT_DOWNGRADE_ACTION_REQUIRED' in target['rule_ids']
+PY
+pass provenance_cannot_downgrade_malicious
+
 for case_name in unknown disguised prepend append;do make_case "$case_name" "$case_name" "$case_name";done
 /usr/bin/python3 - "$TMP/unknown.surface.json" "$TMP/disguised.surface.json" "$TMP/prepend.surface.json" "$TMP/append.surface.json" <<'PY'
 import json,sys
