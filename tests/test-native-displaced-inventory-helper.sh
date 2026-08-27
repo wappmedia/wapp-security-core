@@ -129,10 +129,10 @@ helper='f'*64
 with first.open('w',encoding='ascii',newline='') as out:
     out.write('ROOT\t2f746d70\t2f746d70\t1\t2\t755\t0\t0\t1\t1\t1\n')
     out.write('RUNTIME\tmode\tpath\t'+helper+'\t'+helper+'\n')
-    for index in range(150_000):
+    for index in range(180_000):
         raw=(f'p{index:06d}-'+'x'*56).encode();relative=raw.hex();absolute=(b'/tmp/'+raw).hex()
         out.write('\t'.join(('ENTRY',relative,absolute,'REGULAR','0','0644','1000','1000','1','1','1',str(index+10),'1','-',helper,'0'))+'\n')
-    out.write('SUMMARY\t150001\t1\t150000\t150000\t0\t0\t0\t0\ttrue\t'+helper+'\n')
+    out.write('SUMMARY\t180001\t1\t180000\t180000\t0\t0\t0\t0\ttrue\t'+helper+'\n')
 shutil.copyfile(first,second)
 policy.write_text('C:'+('p000000-'+'x'*56).encode().hex(),encoding='ascii')
 assert first.stat().st_size < 120*1024*1024 and first.stat().st_size > 64*1024*1024
