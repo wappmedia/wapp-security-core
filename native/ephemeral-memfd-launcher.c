@@ -19,8 +19,8 @@ int main(void) {
 }
 #else
 
-#define HELPER_BYTES 94152U
-#define HELPER_SHA256 "bf692cebb99e8bfb440bba29981dc943df74d90125a904ed787835ccdd239a52"
+#define HELPER_BYTES 94296U
+#define HELPER_SHA256 "857cd2e0ce0b234cf52b9ed8cb200464d02a45ac6c6c78a6fb80c5849f04427c"
 
 typedef struct { uint32_t h[8]; uint64_t bits; unsigned char block[64]; size_t used; } Sha256;
 static const uint32_t K[64] = {

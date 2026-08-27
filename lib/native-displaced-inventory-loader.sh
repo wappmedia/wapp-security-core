@@ -40,6 +40,7 @@ trusted_file "$STAT"&&trusted_file "$OPENSSL"&&trusted_file "$PERL"||fail 'base 
 
 perl_identity="$(meta "$PERL")";perl_sha="$(sha "$PERL")"
 runtime_identity="loader=/usr/bin/perl|loader_sha=$perl_sha|loader_meta=$perl_identity|helper_sha=$native_sha|transport=sealed_memfd_execveat_v1"
+printf 'NATIVE_BOOTSTRAP_START_V1\t%s\t%s\t%s\n' "$capture_nonce" "$perl_sha" "$native_sha" >&2
 "$PERL" -T -e '
 use strict;use warnings;use Fcntl qw(F_GETFD F_SETFD FD_CLOEXEC SEEK_SET);
 sub valid_root {

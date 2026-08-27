@@ -348,6 +348,27 @@ assert deltas[0][2] in {'MODIFIED','REPLACED'}
 assert int(header[0][12])==1 and int(header[0][13])==0
 PY
 
+# The hard wall-clock boundary must be explicit and distinguishable from an
+# ordinary nonzero helper exit. Build a test-only one-second variant and run it
+# through the same sealed-memfd loader against the already bounded large tree.
+cc -O2 -std=gnu11 -Wall -Wextra -Werror -DWAPP_NATIVE_MAX_SECONDS=1 "$SOURCE" -o "$TMP/timeout-helper"
+timeout_sha="$(sha "$TMP/timeout-helper")";timeout_bytes="$(wc -c <"$TMP/timeout-helper"|tr -d ' ')"
+/usr/bin/python3 - "$TMP/timeout-helper" "$TMP/timeout-helper.b64" "$LOADER" "$TMP/timeout-probe" <<'PY'
+import base64,os,pathlib,sys
+helper,encoded,loader,probe=map(pathlib.Path,sys.argv[1:])
+encoded.write_bytes(base64.b64encode(helper.read_bytes())+b'\n')
+marker=b'__WAPP_NATIVE_HELPER_BASE64_PAYLOAD__';raw=loader.read_bytes();assert raw.count(marker)==1
+probe.write_bytes(raw.replace(marker,encoded.read_bytes().strip()));os.chmod(probe,0o700)
+PY
+timeout_nonce="$(printf diagnostic-timeout|/usr/bin/openssl dgst -sha256|/usr/bin/awk '{print $NF}')"
+set +e
+/bin/bash "$TMP/timeout-probe" "$CAPACITY_ROOT" "$timeout_nonce" "$timeout_sha" "$timeout_bytes" diagnostic '' >"$TMP/timeout.out" 2>"$TMP/timeout.err"
+timeout_rc=$?
+set -e
+[[ $timeout_rc -eq 124 ]]||fail diagnostic_timeout_status
+grep -Fxq 'wapp-native-displaced-inventory: hard time cap exceeded' "$TMP/timeout.err"||fail diagnostic_timeout_not_explicit
+[[ ! -s "$TMP/timeout.out" ]]||fail diagnostic_timeout_emitted_partial_evidence
+
 # A deliberately too-small inherited address-space budget remains fail-closed.
 run_capacity_diagnostic_under_tight_address_space(){
   (

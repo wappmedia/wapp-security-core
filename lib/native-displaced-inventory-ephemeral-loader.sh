@@ -13,7 +13,7 @@ MKDIR=/bin/mkdir
 CHMOD=/bin/chmod
 RM=/bin/rm
 RMDIR=/bin/rmdir
-LAUNCHER_SHA=73b81536d5a4ba079907eed7bffeca191e7b3ac7a8fced0de74dd228618f47d2
+LAUNCHER_SHA=e47f2a76e0eebbe7f69a6e5616d8fa6c5ec040805987b4575096fe20c3d88042
 LAUNCHER_BYTES=35944
 
 meta(){ "$STAT" -c '%u:%g:%a:%d:%i:%s' "$1" 2>/dev/null; }
@@ -88,7 +88,7 @@ hash_text(){ local value;value="$(LC_ALL=C "$OPENSSL" dgst -sha256 2>/dev/null)"
 target_root="${1:-}";capture_nonce="${2:-}";native_sha="${3:-}";native_bytes="${4:-}";capture_mode="${5:-inventory}";selected_rel_hex="${6:-}"
 [[ "$target_root" == /*&&"$target_root" != /&&${#target_root} -le 4096&&"$target_root" != */&&"$target_root" != *//* ]]||fail 'invalid bounded target'
 IFS=/ read -r -a root_parts <<<"${target_root#/}";for part in "${root_parts[@]}";do [[ -n "$part"&&"$part" != .&&"$part" != .. ]]||fail 'unsafe target component';done
-[[ "$capture_nonce" =~ ^[a-f0-9]{64}$&&"$native_sha" == bf692cebb99e8bfb440bba29981dc943df74d90125a904ed787835ccdd239a52&&"$native_bytes" == 94152 ]]||fail 'invalid release binding'
+[[ "$capture_nonce" =~ ^[a-f0-9]{64}$&&"$native_sha" == 857cd2e0ce0b234cf52b9ed8cb200464d02a45ac6c6c78a6fb80c5849f04427c&&"$native_bytes" == 94296 ]]||fail 'invalid release binding'
 [[ ( "$capture_mode" == inventory||"$capture_mode" == diagnostic )&&-z "$selected_rel_hex"||"$capture_mode" == rollback&&"$selected_rel_hex" =~ ^[a-f0-9]{2,8192}$&&$((${#selected_rel_hex}%2)) -eq 0||"$capture_mode" == volatile-inventory&&${#selected_rel_hex} -le 32768&&"$selected_rel_hex" =~ ^[ACL]:[a-f0-9]+(,[ACL]:[a-f0-9]+)*$ ]]||fail 'invalid bounded capture mode'
 for tool in "$STAT" "$OPENSSL" "$MKDIR" "$CHMOD" "$RM" "$RMDIR";do trusted_file "$tool"||fail 'trusted base tools unavailable';done
 [[ -d "$target_root"&&! -L "$target_root" ]]||fail 'exact target root unavailable'
@@ -101,22 +101,25 @@ root_meta="$(meta "$target_root")"||fail 'target root metadata unavailable';IFS=
 
 created=false;launcher_meta='';cleanup_done=false
 cleanup(){
-  local rc=$? current
+  local rc=$? final_rc current cleanup_state=CLEANUP_UNVERIFIED
+  final_rc=$rc
   if [[ "$created" == true ]];then
     if [[ -e "$launcher"||-L "$launcher" ]];then
       current="$(meta "$launcher" 2>/dev/null||true)"
       if [[ -z "$launcher_meta"||"$current" != "$launcher_meta"||"$(sha "$launcher" 2>/dev/null||true)" != "$LAUNCHER_SHA" ]];then
         printf 'native-ephemeral-loader: cleanup identity drift; staged path retained fail-closed\n' >&2
-        exit 20
+        final_rc=20
+      else
+        "$RM" -- "$launcher"||final_rc=20
       fi
-      "$RM" -- "$launcher"||exit 20
     fi
-    [[ ! -e "$launcher"&&! -L "$launcher" ]]||exit 20
-    "$RMDIR" -- "$stage_dir"||exit 20
-    [[ ! -e "$stage_dir"&&! -L "$stage_dir" ]]||exit 20
-    cleanup_done=true
+    if [[ ! -e "$launcher"&&! -L "$launcher" ]];then "$RMDIR" -- "$stage_dir"||final_rc=20;else final_rc=20;fi
   fi
-  return "$rc"
+  if [[ ! -e "$launcher"&&! -L "$launcher"&&! -e "$stage_dir"&&! -L "$stage_dir" ]];then cleanup_done=true;cleanup_state=CLEANUP_VERIFIED;else final_rc=20;fi
+  if [[ $rc -ne 0||$final_rc -ne 0 ]];then
+    printf 'EPHEMERAL_BOOTSTRAP_FAILURE_AUDIT_V1\t%s\t%s\t%s\t%s\t%s\n' "$capture_nonce" "$LAUNCHER_SHA" "$native_sha" "$final_rc" "$cleanup_state" >&2
+  fi
+  return "$final_rc"
 }
 trap cleanup EXIT
 
@@ -138,6 +141,7 @@ runtime_identity="loader=DEGRADED_ASSURANCE_EPHEMERAL_BOOTSTRAP_V1|launcher_sha=
 runtime_identity_sha="$(printf %s "$runtime_identity"|hash_text)";[[ "$runtime_identity_sha" =~ ^[a-f0-9]{64}$ ]]||fail 'runtime identity hash failed'
 
 launcher_args=("$capture_mode" "$target_root" "$capture_nonce" "$runtime_identity");[[ -z "$selected_rel_hex" ]]||launcher_args+=("$selected_rel_hex")
+printf 'EPHEMERAL_BOOTSTRAP_START_V1\t%s\t%s\t%s\n' "$capture_nonce" "$LAUNCHER_SHA" "$native_sha" >&2
 "$OPENSSL" base64 -d -A <<'WAPP_NATIVE_HELPER_BASE64_V1' | "$launcher" "${launcher_args[@]}"
 __WAPP_NATIVE_HELPER_BASE64_PAYLOAD__
 WAPP_NATIVE_HELPER_BASE64_V1

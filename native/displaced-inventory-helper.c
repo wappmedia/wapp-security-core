@@ -38,13 +38,17 @@ int main(void) {
 #define ST_RDONLY 0x0001
 #endif
 
+#ifndef WAPP_NATIVE_MAX_SECONDS
+#define WAPP_NATIVE_MAX_SECONDS 900
+#endif
+
 enum {
     ENTRY_CAP = 200000,
     DIRECTORY_CAP = 50000,
     FILE_CAP = 150000,
     DEPTH_CAP = 64,
     MAX_RELATIVE_BYTES = 4096,
-    MAX_SECONDS = 900,
+    MAX_SECONDS = WAPP_NATIVE_MAX_SECONDS,
     IO_CHUNK = 1024 * 1024,
     /* Relative + absolute + symlink-target hex and fixed metadata stay bounded. */
     DIAGNOSTIC_LINE_CAP = MAX_RELATIVE_BYTES * 9 + 4096,
@@ -100,7 +104,10 @@ typedef struct {
 } Snapshot;
 
 static void die(const char *m){fprintf(stderr,"wapp-native-displaced-inventory: %s\n",m);exit(20);}
-static void alarm_exit(int unused){(void)unused;_exit(20);}
+static void alarm_exit(int unused){
+  static const char message[]="wapp-native-displaced-inventory: hard time cap exceeded\n";
+  (void)unused;(void)write(STDERR_FILENO,message,sizeof(message)-1);_exit(124);
+}
 static void apply_process_limits(void){struct rlimit memory={256ULL*1024ULL*1024ULL,256ULL*1024ULL*1024ULL},cpu={MAX_SECONDS+5,MAX_SECONDS+5},files={64,64};if(setrlimit(RLIMIT_AS,&memory)<0||setrlimit(RLIMIT_CPU,&cpu)<0||setrlimit(RLIMIT_NOFILE,&files)<0)die("process limits unavailable");signal(SIGALRM,alarm_exit);alarm(MAX_SECONDS);}
 static void *xmalloc(size_t n){void *p=malloc(n?n:1);if(!p)die("memory cap/allocation failure");return p;}
 static void check_deadline(Snapshot *s){if(time(NULL)>s->deadline)die("hard time cap exceeded");}
