@@ -341,7 +341,7 @@ chmod 0755 "$runtime_root/physical-parent"
 mv "$WAPP_EMERGENCY_REPORTS_ROOT" "$runtime_root/reports.physical";ln -s reports.physical "$WAPP_EMERGENCY_REPORTS_ROOT"
 expect_fail reports_handoff_symlink python3 "$MODEL" exec-launcher --launcher "$run/launcher" --sha256 "$launcher_sha" --package-sha256 "$package_sha"
 rm "$WAPP_EMERGENCY_REPORTS_ROOT";mv "$runtime_root/reports.physical" "$WAPP_EMERGENCY_REPORTS_ROOT"
-runtime_mode="$(stat -f %Lp "$runtime_root")";chmod 0777 "$runtime_root"
+read -r _runtime_owner runtime_mode <<<"$(recovery_stat_owner_mode "$runtime_root")";chmod 0777 "$runtime_root"
 expect_fail writable_package_runtime python3 "$MODEL" exec-launcher --launcher "$run/launcher" --sha256 "$launcher_sha" --package-sha256 "$package_sha"
 chmod "$runtime_mode" "$runtime_root"
 build_consumed_reopen_fixture
