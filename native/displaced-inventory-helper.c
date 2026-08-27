@@ -320,7 +320,8 @@ static void emit_volatile_inventory(const char *root,const char *first_text,cons
   for(size_t k=0;k<policy.n;k++)lines_add(&trailer,fmt_alloc("VOLATILE_RUNTIME_CANDIDATE_PATH\t%s\t%s\t%s",policy.v[k].path,policy.v[k].behavior=='C'?"CTIME_ONLY":policy.v[k].behavior=='A'?"APPEND_PREFIX_VERIFIED_UPLOAD_LOG_GROWTH":"APPEND_PREFIX_VERIFIED_LOG_GROWTH",policy.v[k].observed?"OBSERVED_DRIFT":"OBSERVED_STABLE"));
   size_t total=strlen("CAPTURE_NONCE\t")+strlen(nonce)+1+strlen(second_text);for(size_t k=0;k<trailer.n;k++)total+=strlen(trailer.v[k])+1;if(total>MAX_OUTPUT_BYTES)die("volatile inventory serialized output cap");
   if(printf("CAPTURE_NONCE\t%s\n",nonce)<0||fputs(second_text,stdout)==EOF)die("output write failure");
-  for(size_t k=0;k<trailer.n;k++)if(fputs(trailer.v[k],stdout)==EOF||fputc('\n',stdout)==EOF)die("output write failure");if(fflush(stdout)==EOF)die("output write failure");
+  for(size_t k=0;k<trailer.n;k++)if(fputs(trailer.v[k],stdout)==EOF||fputc('\n',stdout)==EOF)die("output write failure");
+  if(fflush(stdout)==EOF)die("output write failure");
   lines_free(&trailer);free_volatile_policy(&policy);
 }
 static char *diagnostic_delta(const char *first_text,const char *second_text,const char *nonce,const char *helper_sha,const char *runtime_identity){
