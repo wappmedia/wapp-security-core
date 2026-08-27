@@ -26,8 +26,8 @@ assert policy['authority']=={'apply':False,'closure':False,'mutation':False,'pre
 assert policy['build_tool']=='zig-0.15.2' and policy['artifact_encoding']=='base64-rfc4648-no-wrap-v1'
 assert re.fullmatch(rb'[A-Za-z0-9+/]+={0,2}\n',encoded)
 binary=base64.b64decode(encoded.strip(),validate=True)
-assert len(encoded)==policy['launcher_encoded_bytes']==47929 and hashlib.sha256(encoded).hexdigest()==policy['launcher_encoded_sha256']=='0bf51f61442b027e25ac4f60e6b48df509158eb2dec8bf8922511893ef3af9ab'
-assert len(binary)==policy['launcher_binary_bytes']==35944 and hashlib.sha256(binary).hexdigest()==policy['launcher_binary_sha256']=='e5d09097d13e47b5a35cbbeed587ea4026ce1d7cbf5c04bd0c9b465612322833'
+assert len(encoded)==policy['launcher_encoded_bytes']==47929 and hashlib.sha256(encoded).hexdigest()==policy['launcher_encoded_sha256']=='ae4a6b01526273512cedb5a1a44b8884ae5973fba1a09ec51f48073bfcd19941'
+assert len(binary)==policy['launcher_binary_bytes']==35944 and hashlib.sha256(binary).hexdigest()==policy['launcher_binary_sha256']=='73b81536d5a4ba079907eed7bffeca191e7b3ac7a8fced0de74dd228618f47d2'
 for field in ('helper_policy_path','launcher_encoded_path','launcher_source_path','loader_template_path'):
  path=(root/policy[field]).resolve();assert path.is_file() and not path.is_symlink() and str(path).startswith(str(root)+'/')
 PY
@@ -51,8 +51,8 @@ assert '[[ -f "$path"&&! -L "$path"&&-x "$path" ]]' in text
 assert '"$uid" == 0&&"$gid" == 0' in text and '(8#$mode & 022)==0' in text
 assert '"$logical" -ef "$physical"' in text and '"$logical_meta" == "$physical_meta"' in text
 PY
-grep -Fq '#define HELPER_BYTES 96504U' "$SOURCE"||fail helper_size_not_compiled
-grep -Fq '#define HELPER_SHA256 "21b785240a1ed4a67c6cd49922f1a5925e0cde24f029d9540d05935a9cdbd4a2"' "$SOURCE"||fail helper_sha_not_compiled
+grep -Fq '#define HELPER_BYTES 94152U' "$SOURCE"||fail helper_size_not_compiled
+grep -Fq '#define HELPER_SHA256 "bf692cebb99e8bfb440bba29981dc943df74d90125a904ed787835ccdd239a52"' "$SOURCE"||fail helper_sha_not_compiled
 grep -Fq '!strcmp(argv[1],"inventory")||!strcmp(argv[1],"diagnostic")' "$SOURCE"||fail diagnostic_mode_not_allowlisted
 grep -Fq 'strcmp(argv[1],"inventory")&&strcmp(argv[1],"diagnostic")&&strcmp(argv[1],"rollback")&&strcmp(argv[1],"volatile-inventory")' "$SOURCE"||fail arbitrary_mode_guard_missing
 grep -Fq 'SYS_memfd_create' "$SOURCE"&&grep -Fq 'F_ADD_SEALS' "$SOURCE"&&grep -Fq 'SYS_execveat' "$SOURCE"||fail descriptor_launch_contract_missing
@@ -116,7 +116,7 @@ import base64,os,pathlib,sys
 source,target=map(pathlib.Path,sys.argv[1:]);target.write_bytes(base64.b64decode(source.read_bytes().strip(),validate=True));os.chmod(target,0o700)
 PY
 before="$(find "$SITE" -print0|sort -z|xargs -0 stat -c '%n:%F:%s:%a:%u:%g:%d:%i'|sha256sum|awk '{print $1}')";out="$TMP/out.tsv"
-/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc "$probe" "$SITE" "$nonce" 21b785240a1ed4a67c6cd49922f1a5925e0cde24f029d9540d05935a9cdbd4a2 96504 inventory '' >"$out"
+/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc "$probe" "$SITE" "$nonce" bf692cebb99e8bfb440bba29981dc943df74d90125a904ed787835ccdd239a52 94152 inventory '' >"$out"
 grep -Fq $'CAPTURE_NONCE\t'"$nonce" "$out"&&grep -Fq 'EPHEMERAL_BOOTSTRAP_AUDIT_V2' "$out"&&grep -Fq 'CLEANUP_VERIFIED' "$out"||fail correct_staged_launcher
 after="$(find "$SITE" -print0|sort -z|xargs -0 stat -c '%n:%F:%s:%a:%u:%g:%d:%i'|sha256sum|awk '{print $1}')";[[ "$before" == "$after" ]]||fail webroot_modified
 [[ ! -e "$ROOT_PARENT/.wapp-security-ephemeral-bootstrap-$nonce" ]]||fail cleanup_not_absent
@@ -125,12 +125,12 @@ after="$(find "$SITE" -print0|sort -z|xargs -0 stat -c '%n:%F:%s:%a:%u:%g:%d:%i'
 # launcher's exact mode/argument boundary. This proves the release-pinned
 # degraded path accepted and descriptor-launched diagnostic mode.
 diagnostic_nonce="$(printf diagnostic-stable|sha256sum|awk '{print $1}')";diagnostic_err="$TMP/diagnostic.err"
-if /bin/bash "$probe" "$SITE" "$diagnostic_nonce" 21b785240a1ed4a67c6cd49922f1a5925e0cde24f029d9540d05935a9cdbd4a2 96504 diagnostic '' >"$TMP/diagnostic.out" 2>"$diagnostic_err";then fail stable_diagnostic_unexpected_success;fi
+if /bin/bash "$probe" "$SITE" "$diagnostic_nonce" bf692cebb99e8bfb440bba29981dc943df74d90125a904ed787835ccdd239a52 94152 diagnostic '' >"$TMP/diagnostic.out" 2>"$diagnostic_err";then fail stable_diagnostic_unexpected_success;fi
 grep -Fq 'wapp-native-displaced-inventory: diagnostic mode requires two-pass mismatch' "$diagnostic_err"||fail degraded_diagnostic_not_descriptor_launched
 [[ ! -e "$ROOT_PARENT/.wapp-security-ephemeral-bootstrap-$diagnostic_nonce" ]]||fail diagnostic_cleanup_not_absent
 
 arbitrary_nonce="$(printf arbitrary-mode|sha256sum|awk '{print $1}')";arbitrary_err="$TMP/arbitrary.err"
-runtime_identity='loader=DEGRADED_ASSURANCE_EPHEMERAL_BOOTSTRAP_V1|launcher_sha=e5d09097d13e47b5a35cbbeed587ea4026ce1d7cbf5c04bd0c9b465612322833|launcher_meta=0:0:700:1:2:35944|helper_sha=21b785240a1ed4a67c6cd49922f1a5925e0cde24f029d9540d05935a9cdbd4a2|transport=sealed_memfd_execveat_v1'
+runtime_identity='loader=DEGRADED_ASSURANCE_EPHEMERAL_BOOTSTRAP_V1|launcher_sha=73b81536d5a4ba079907eed7bffeca191e7b3ac7a8fced0de74dd228618f47d2|launcher_meta=0:0:700:1:2:35944|helper_sha=bf692cebb99e8bfb440bba29981dc943df74d90125a904ed787835ccdd239a52|transport=sealed_memfd_execveat_v1'
 if "$launcher_direct" arbitrary "$SITE" "$arbitrary_nonce" "$runtime_identity" </dev/null >/dev/null 2>"$arbitrary_err";then fail arbitrary_mode_accepted;fi
 grep -Fq 'wapp-ephemeral-memfd-launcher: invalid bounded mode' "$arbitrary_err"||fail arbitrary_mode_not_rejected_by_launcher
 
@@ -139,12 +139,12 @@ if "$launcher_direct" diagnostic "$SITE" "$cardinality_nonce" "$runtime_identity
 grep -Fq 'wapp-ephemeral-memfd-launcher: invalid bounded invocation' "$cardinality_err"||fail diagnostic_cardinality_not_rejected_by_launcher
 
 bad_nonce="$(printf bad|sha256sum|awk '{print $1}')";build_probe "$bad" "$TMP/bad-probe.sh"
-if /bin/bash "$TMP/bad-probe.sh" "$SITE" "$bad_nonce" 21b785240a1ed4a67c6cd49922f1a5925e0cde24f029d9540d05935a9cdbd4a2 96504 inventory '' >/dev/null 2>&1;then fail hash_mismatch_accepted;fi
+if /bin/bash "$TMP/bad-probe.sh" "$SITE" "$bad_nonce" bf692cebb99e8bfb440bba29981dc943df74d90125a904ed787835ccdd239a52 94152 inventory '' >/dev/null 2>&1;then fail hash_mismatch_accepted;fi
 
 collision_nonce="$(printf collision|sha256sum|awk '{print $1}')";mkdir -m 700 "$ROOT_PARENT/.wapp-security-ephemeral-bootstrap-$collision_nonce"
-if /bin/bash "$probe" "$SITE" "$collision_nonce" 21b785240a1ed4a67c6cd49922f1a5925e0cde24f029d9540d05935a9cdbd4a2 96504 inventory '' >/dev/null 2>&1;then fail preexisting_directory_accepted;fi
+if /bin/bash "$probe" "$SITE" "$collision_nonce" bf692cebb99e8bfb440bba29981dc943df74d90125a904ed787835ccdd239a52 94152 inventory '' >/dev/null 2>&1;then fail preexisting_directory_accepted;fi
 rm -rf "$ROOT_PARENT/.wapp-security-ephemeral-bootstrap-$collision_nonce";ln -s "$SITE" "$ROOT_PARENT/.wapp-security-ephemeral-bootstrap-$collision_nonce"
-if /bin/bash "$probe" "$SITE" "$collision_nonce" 21b785240a1ed4a67c6cd49922f1a5925e0cde24f029d9540d05935a9cdbd4a2 96504 inventory '' >/dev/null 2>&1;then fail symlink_accepted;fi
+if /bin/bash "$probe" "$SITE" "$collision_nonce" bf692cebb99e8bfb440bba29981dc943df74d90125a904ed787835ccdd239a52 94152 inventory '' >/dev/null 2>&1;then fail symlink_accepted;fi
 rm "$ROOT_PARENT/.wapp-security-ephemeral-bootstrap-$collision_nonce"
 
 mkdir -m 777 "$TMP/writable-parent";if trusted_directory "$TMP/writable-parent";then fail writable_directory_accepted;fi

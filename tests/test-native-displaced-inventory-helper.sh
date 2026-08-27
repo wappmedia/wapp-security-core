@@ -97,6 +97,45 @@ PY
 fi
 
 [[ "$(uname -s):$(uname -m)" == Linux:x86_64 ]]||fail unsupported_test_platform
+
+# The volatile-inventory validator must stay below the unchanged 256 MiB
+# process ceiling at a large, valid snapshot size.  This in-process harness
+# supplies two complete canonical snapshots without filesystem scan noise; the
+# retired parser copied both snapshots and every ENTRY and exhausted the cap.
+cat >"$TMP/volatile-memory-harness.c" <<'C'
+#define main wapp_native_helper_main
+#include "displaced-inventory-helper.c"
+#undef main
+static char *read_all(const char *path){
+  FILE *file=fopen(path,"rb");if(!file)die("test input open");
+  if(fseek(file,0,SEEK_END)||ftell(file)<0)die("test input size");long size=ftell(file);
+  if(fseek(file,0,SEEK_SET))die("test input seek");char *value=xmalloc((size_t)size+1);
+  if(fread(value,1,(size_t)size,file)!=(size_t)size||fclose(file))die("test input read");value[size]=0;return value;
+}
+int main(int argc,char **argv){
+  if(argc!=5)return 64;apply_process_limits();char *first=read_all(argv[1]),*second=read_all(argv[2]);
+  emit_volatile_inventory("/tmp",first,second,argv[3],argv[4]);free(first);free(second);return 0;
+}
+C
+cc -O2 -std=gnu11 -Wall -Wextra -Werror -I"$ROOT/native" "$TMP/volatile-memory-harness.c" -o "$TMP/volatile-memory-harness"
+/usr/bin/python3 - "$TMP/volatile-first.tsv" "$TMP/volatile-second.tsv" "$TMP/volatile-policy.txt" <<'PY'
+import pathlib,shutil,sys
+first,second,policy=map(pathlib.Path,sys.argv[1:])
+helper='f'*64
+with first.open('w',encoding='ascii',newline='') as out:
+    out.write('ROOT\t2f746d70\t2f746d70\t1\t2\t755\t0\t0\t1\t1\t1\n')
+    out.write('RUNTIME\tmode\tpath\t'+helper+'\t'+helper+'\n')
+    for index in range(150_000):
+        raw=(f'p{index:06d}-'+'x'*56).encode();relative=raw.hex();absolute=(b'/tmp/'+raw).hex()
+        out.write('\t'.join(('ENTRY',relative,absolute,'REGULAR','0','0644','1000','1000','1','1','1',str(index+10),'1','-',helper,'0'))+'\n')
+    out.write('SUMMARY\t150001\t1\t150000\t150000\t0\t0\t0\t0\ttrue\t'+helper+'\n')
+shutil.copyfile(first,second)
+policy.write_text('C:'+('p000000-'+'x'*56).encode().hex(),encoding='ascii')
+assert first.stat().st_size < 120*1024*1024 and first.stat().st_size > 64*1024*1024
+PY
+VOLATILE_MEMORY_NONCE="$(printf volatile-memory-contract|/usr/bin/openssl dgst -sha256|/usr/bin/awk '{print $NF}')"
+"$TMP/volatile-memory-harness" "$TMP/volatile-first.tsv" "$TMP/volatile-second.tsv" "$VOLATILE_MEMORY_NONCE" "$(cat "$TMP/volatile-policy.txt")" >/dev/null
+
 TEST_ROOT="$TMP/provider-neutral/site-root"
 mkdir -p "$TEST_ROOT/wp-content/plugins/synthetic/deep/a/b/c" "$TEST_ROOT/wp-content/uploads/2026/08" "$TEST_ROOT/permission-denied"
 printf 'plugin bytes\n' >"$TEST_ROOT/wp-content/plugins/synthetic/plugin.php"

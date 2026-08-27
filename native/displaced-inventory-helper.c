@@ -87,12 +87,9 @@ typedef struct { unsigned char *v; size_t n; } Bytes;
 typedef struct { dev_t dev; ino_t ino; } Identity;
 typedef struct { Identity *v; size_t n,cap; } Identities;
 typedef struct { char *storage; char *field[16]; } DiagnosticEntry;
-typedef struct { DiagnosticEntry *v; size_t n,cap; } DiagnosticEntries;
-typedef struct { char *key,*storage; char *field[4]; } DiagnosticIssue;
-typedef struct { DiagnosticIssue *v; size_t n,cap; } DiagnosticIssues;
 typedef struct { const char *cursor; char previous[DIAGNOSTIC_LINE_CAP]; size_t count; } DiagnosticCursor;
 typedef struct { char storage[DIAGNOSTIC_LINE_CAP]; char *field[16]; } DiagnosticRecord;
-typedef struct { char behavior; char *path; int observed; } VolatileRule;
+typedef struct { char behavior; char *path; int present,observed; } VolatileRule;
 typedef struct { VolatileRule v[64]; size_t n; } VolatilePolicy;
 static int nibble(char c);
 static unsigned char *decode_hex(const char *text,size_t *outn);
@@ -199,35 +196,6 @@ static int canonical_relhex(const char *text){
   }
   free(raw);return ok;
 }
-static void diagnostic_entries_add(DiagnosticEntries *entries,char *line){
-  if(entries->n==entries->cap){size_t next=entries->cap?entries->cap*2:256;if(next>ENTRY_CAP)next=ENTRY_CAP;if(next<=entries->cap)die("diagnostic entry cap");entries->v=realloc(entries->v,next*sizeof(*entries->v));if(!entries->v)die("diagnostic allocation");entries->cap=next;}
-  DiagnosticEntry *entry=&entries->v[entries->n++];memset(entry,0,sizeof *entry);entry->storage=strdup(line);if(!entry->storage)die("diagnostic allocation");
-  if(split_tabs(entry->storage,entry->field,16)!=16||strcmp(entry->field[0],"ENTRY")||!canonical_relhex(entry->field[1]))die("diagnostic source entry invalid");
-  if(entries->n>1&&strcmp(entries->v[entries->n-2].field[1],entry->field[1])>=0)die("diagnostic source ordering invalid");
-}
-static void diagnostic_entries_free(DiagnosticEntries *entries){for(size_t i=0;i<entries->n;i++)free(entries->v[i].storage);free(entries->v);memset(entries,0,sizeof *entries);}
-static void diagnostic_issues_add(DiagnosticIssues *issues,char *line){
-  if(issues->n==issues->cap){size_t next=issues->cap?issues->cap*2:64;if(next>ENTRY_CAP)next=ENTRY_CAP;if(next<=issues->cap)die("diagnostic issue cap");issues->v=realloc(issues->v,next*sizeof(*issues->v));if(!issues->v)die("diagnostic allocation");issues->cap=next;}
-  DiagnosticIssue *issue=&issues->v[issues->n++];memset(issue,0,sizeof *issue);issue->key=strdup(line);issue->storage=strdup(line);if(!issue->key||!issue->storage)die("diagnostic allocation");
-  if(split_tabs(issue->storage,issue->field,4)!=4||strcmp(issue->field[0],"UNRESOLVED")||!canonical_relhex(issue->field[2])||!valid_sha(issue->field[3]))die("diagnostic source issue invalid");
-  if(issues->n>1&&strcmp(issues->v[issues->n-2].key,issue->key)>=0)die("diagnostic issue ordering invalid");
-}
-static void diagnostic_issues_free(DiagnosticIssues *issues){for(size_t i=0;i<issues->n;i++){free(issues->v[i].key);free(issues->v[i].storage);}free(issues->v);memset(issues,0,sizeof *issues);}
-static void parse_diagnostic_snapshot(const char *snapshot_text,DiagnosticEntries *entries,DiagnosticIssues *issues,char root[11][8193],char runtime[5][1025]){
-  char *copy=strdup(snapshot_text);if(!copy)die("diagnostic allocation");int root_seen=0,runtime_seen=0;char *save=NULL;
-  for(char *line=strtok_r(copy,"\n",&save);line;line=strtok_r(NULL,"\n",&save)){
-    if(!strncmp(line,"ENTRY\t",6)){diagnostic_entries_add(entries,line);continue;}
-    if(!strncmp(line,"UNRESOLVED\t",11)){diagnostic_issues_add(issues,line);continue;}
-    if(!strncmp(line,"ROOT\t",5)){
-      if(root_seen++)die("diagnostic duplicate root");char *field[11];if(split_tabs(line,field,11)!=11)die("diagnostic root invalid");
-      for(size_t i=0;i<11;i++){if(strlen(field[i])>=8193)die("diagnostic root field cap");strcpy(root[i],field[i]);}
-    }else if(!strncmp(line,"RUNTIME\t",8)){
-      if(runtime_seen++)die("diagnostic duplicate runtime");char *field[5];if(split_tabs(line,field,5)!=5)die("diagnostic runtime invalid");
-      for(size_t i=0;i<5;i++){if(strlen(field[i])>=1025)die("diagnostic runtime field cap");strcpy(runtime[i],field[i]);}
-    }
-  }
-  free(copy);if(root_seen!=1||runtime_seen!=1||strcmp(root[0],"ROOT")||strcmp(runtime[0],"RUNTIME"))die("diagnostic snapshot binding missing");
-}
 static int diagnostic_line_next(const char **cursor,const char **line,size_t *length){
   while(**cursor){
     const char *start=*cursor,*end=strchr(start,'\n');size_t n=end?(size_t)(end-start):strlen(start);*cursor=end?end+1:start+n;
@@ -310,21 +278,23 @@ static void verify_log_prefix(const char *root,const DiagnosticEntry *a,const Di
   if(strcmp(actual,a->field[14])||fstat(fd,&after)<0||fstatat(parent,name,&pathst,AT_SYMLINK_NOFOLLOW)<0||fstat(rootfd,&root_after)<0||!same_stat(&opened,&after)||!same_stat(&after,&pathst)||!same_stat(&root_before,&root_after))die("volatile upload append-prefix proof failed");
   close(fd);if(parent!=rootfd)close(parent);close(rootfd);free(rel);
 }
-static char *volatile_inventory(const char *root,const char *first_text,const char *second_text,const char *nonce,const char *policy_token){
-  DiagnosticEntries first={0},second={0};DiagnosticIssues first_issues={0},second_issues={0};char root1[11][8193]={{0}},root2[11][8193]={{0}},runtime1[5][1025]={{0}},runtime2[5][1025]={{0}};VolatilePolicy policy={0};
-  parse_diagnostic_snapshot(first_text,&first,&first_issues,root1,runtime1);parse_diagnostic_snapshot(second_text,&second,&second_issues,root2,runtime2);parse_volatile_policy(policy_token,&policy);
+static void emit_volatile_inventory(const char *root,const char *first_text,const char *second_text,const char *nonce,const char *policy_token){
+  char root1[11][8193]={{0}},root2[11][8193]={{0}},runtime1[5][1025]={{0}},runtime2[5][1025]={{0}};VolatilePolicy policy={0};
+  parse_diagnostic_bindings(first_text,root1,runtime1);parse_diagnostic_bindings(second_text,root2,runtime2);parse_volatile_policy(policy_token,&policy);
   if(strcmp(root1[1],root2[1])||strcmp(root1[3],root2[3])||strcmp(root1[4],root2[4])||strcmp(runtime1[1],runtime2[1])||strcmp(runtime1[2],runtime2[2])||strcmp(runtime1[3],runtime2[3])||strcmp(runtime1[4],runtime2[4]))die("volatile inventory identity mismatch");
-  if(first_issues.n||second_issues.n)die("volatile inventory unresolved evidence");
-  size_t i=0,j=0;while(i<first.n||j<second.n){DiagnosticEntry *a=i<first.n?&first.v[i]:NULL,*b=j<second.n?&second.v[j]:NULL;int order=a&&b?strcmp(a->field[1],b->field[1]):(a?-1:1);
-    if(order!=0)die("volatile inventory create/delete event");VolatileRule *rule=volatile_rule(&policy,a->field[1]);if(!diagnostic_entry_equal(a,b)){if(!rule)die("volatile inventory unclassified drift");if(rule->behavior=='C'&&(!ctime_only(a,b)||(exact_octal(a->field[5],"volatile mode invalid")&0111)||(exact_octal(b->field[5],"volatile mode invalid")&0111)))die("volatile inventory behavior mismatch");if(rule->behavior=='L'){if(!monotonic_log_growth(a,b))die("volatile log behavior mismatch");verify_log_prefix(root,a,b,"0");}if(rule->behavior=='A'){if(!monotonic_log_growth(a,b))die("volatile upload behavior mismatch");verify_log_prefix(root,a,b,"1");}rule->observed=1;}else if(rule){if(strcmp(a->field[3],"REGULAR")||(exact_octal(a->field[5],"volatile mode invalid")&0111)||(rule->behavior=='A'?strcmp(a->field[15],"1"):strcmp(a->field[15],"0")))die("volatile stable target invalid");rule->observed=0;}i++;j++;
+  DiagnosticCursor first_issues={.cursor=first_text},second_issues={.cursor=second_text};DiagnosticRecord first_issue,second_issue;size_t first_issue_count=0,second_issue_count=0;
+  while(diagnostic_issue_next(&first_issues,&first_issue))first_issue_count++;while(diagnostic_issue_next(&second_issues,&second_issue))second_issue_count++;
+  if(first_issue_count||second_issue_count)die("volatile inventory unresolved evidence");
+  DiagnosticCursor first_entries={.cursor=first_text},second_entries={.cursor=second_text};DiagnosticRecord first_record,second_record;int have_first=diagnostic_entry_next(&first_entries,&first_record),have_second=diagnostic_entry_next(&second_entries,&second_record);
+  while(have_first||have_second){DiagnosticEntry a={.storage=first_record.storage},b={.storage=second_record.storage};if(have_first)memcpy(a.field,first_record.field,sizeof a.field);if(have_second)memcpy(b.field,second_record.field,sizeof b.field);int order=have_first&&have_second?strcmp(a.field[1],b.field[1]):(have_first?-1:1);
+    if(order!=0)die("volatile inventory create/delete event");VolatileRule *rule=volatile_rule(&policy,a.field[1]);if(rule)rule->present=1;if(!diagnostic_entry_equal(&a,&b)){if(!rule)die("volatile inventory unclassified drift");if(rule->behavior=='C'&&(!ctime_only(&a,&b)||(exact_octal(a.field[5],"volatile mode invalid")&0111)||(exact_octal(b.field[5],"volatile mode invalid")&0111)))die("volatile inventory behavior mismatch");if(rule->behavior=='L'){if(!monotonic_log_growth(&a,&b))die("volatile log behavior mismatch");verify_log_prefix(root,&a,&b,"0");}if(rule->behavior=='A'){if(!monotonic_log_growth(&a,&b))die("volatile upload behavior mismatch");verify_log_prefix(root,&a,&b,"1");}rule->observed=1;}else if(rule){if(strcmp(a.field[3],"REGULAR")||(exact_octal(a.field[5],"volatile mode invalid")&0111)||(rule->behavior=='A'?strcmp(a.field[15],"1"):strcmp(a.field[15],"0")))die("volatile stable target invalid");rule->observed=0;}have_first=diagnostic_entry_next(&first_entries,&first_record);have_second=diagnostic_entry_next(&second_entries,&second_record);
   }
-  for(size_t k=0;k<policy.n;k++){DiagnosticEntry *found=NULL;for(size_t x=0;x<second.n;x++)if(!strcmp(second.v[x].field[1],policy.v[k].path)){found=&second.v[x];break;}if(!found)die("volatile policy target missing");}
-  char token_sha[65];digest(policy_token,strlen(policy_token),token_sha);Lines output={0};lines_add(&output,fmt_alloc("CAPTURE_NONCE\t%s",nonce));
-  char *copy=strdup(second_text);if(!copy)die("volatile inventory allocation");char *save=NULL;for(char *line=strtok_r(copy,"\n",&save);line;line=strtok_r(NULL,"\n",&save))lines_add(&output,strdup(line));free(copy);
-  lines_add(&output,fmt_alloc("VOLATILE_RUNTIME_CANDIDATE\tBOUNDED_VOLATILE_RUNTIME_CANDIDATE_V1\t%s\t%zu\tVISIBLE\tUNVERIFIED_NON_AUTHORIZING",token_sha,policy.n));
-  for(size_t k=0;k<policy.n;k++)lines_add(&output,fmt_alloc("VOLATILE_RUNTIME_CANDIDATE_PATH\t%s\t%s\t%s",policy.v[k].path,policy.v[k].behavior=='C'?"CTIME_ONLY":policy.v[k].behavior=='A'?"APPEND_PREFIX_VERIFIED_UPLOAD_LOG_GROWTH":"APPEND_PREFIX_VERIFIED_LOG_GROWTH",policy.v[k].observed?"OBSERVED_DRIFT":"OBSERVED_STABLE"));
-  size_t total=1;for(size_t k=0;k<output.n;k++)total+=strlen(output.v[k])+1;if(total>MAX_OUTPUT_BYTES)die("volatile inventory serialized output cap");char *serialized=xmalloc(total),*cursor=serialized;for(size_t k=0;k<output.n;k++){size_t n=strlen(output.v[k]);memcpy(cursor,output.v[k],n);cursor+=n;*cursor++='\n';}*cursor=0;
-  lines_free(&output);free_volatile_policy(&policy);diagnostic_entries_free(&first);diagnostic_entries_free(&second);diagnostic_issues_free(&first_issues);diagnostic_issues_free(&second_issues);return serialized;
+  for(size_t k=0;k<policy.n;k++)if(!policy.v[k].present)die("volatile policy target missing");
+  char token_sha[65];digest(policy_token,strlen(policy_token),token_sha);Lines trailer={0};lines_add(&trailer,fmt_alloc("VOLATILE_RUNTIME_CANDIDATE\tBOUNDED_VOLATILE_RUNTIME_CANDIDATE_V1\t%s\t%zu\tVISIBLE\tUNVERIFIED_NON_AUTHORIZING",token_sha,policy.n));
+  for(size_t k=0;k<policy.n;k++)lines_add(&trailer,fmt_alloc("VOLATILE_RUNTIME_CANDIDATE_PATH\t%s\t%s\t%s",policy.v[k].path,policy.v[k].behavior=='C'?"CTIME_ONLY":policy.v[k].behavior=='A'?"APPEND_PREFIX_VERIFIED_UPLOAD_LOG_GROWTH":"APPEND_PREFIX_VERIFIED_LOG_GROWTH",policy.v[k].observed?"OBSERVED_DRIFT":"OBSERVED_STABLE"));
+  size_t total=strlen("CAPTURE_NONCE\t")+strlen(nonce)+1+strlen(second_text);for(size_t k=0;k<trailer.n;k++)total+=strlen(trailer.v[k])+1;if(total>MAX_OUTPUT_BYTES)die("volatile inventory serialized output cap");
+  if(printf("CAPTURE_NONCE\t%s\n",nonce)<0||fputs(second_text,stdout)==EOF)die("output write failure");for(size_t k=0;k<trailer.n;k++)if(fputs(trailer.v[k],stdout)==EOF||fputc('\n',stdout)==EOF)die("output write failure");if(fflush(stdout)==EOF)die("output write failure");
+  lines_free(&trailer);free_volatile_policy(&policy);
 }
 static char *diagnostic_delta(const char *first_text,const char *second_text,const char *nonce,const char *helper_sha,const char *runtime_identity){
   if(!strcmp(first_text,second_text))die("diagnostic mode requires two-pass mismatch");
@@ -422,7 +392,7 @@ int main(int argc,char **argv){
   apply_process_limits();if((argc!=7&&argc!=8)||!valid_root(argv[2])||!valid_nonce(argv[3])||!valid_sha(argv[4])||strlen(argv[5])>512)die("invalid bounded invocation");verify_self_fd(argv[6],argv[4]);
   if(argc==7&&!strcmp(argv[1],"inventory")){char *first=snapshot(argv[2],argv[4],argv[5]);char *second=snapshot(argv[2],argv[4],argv[5]);if(strcmp(first,second))die("inventory drift between passes");emit_capture(argv[3],first);free(first);free(second);return 0;}
   if(argc==7&&!strcmp(argv[1],"diagnostic")){char *first=snapshot(argv[2],argv[4],argv[5]);char *second=snapshot(argv[2],argv[4],argv[5]);char *delta=diagnostic_delta(first,second,argv[3],argv[4],argv[5]);emit_payload(delta);free(delta);free(first);free(second);return 0;}
-  if(argc==8&&!strcmp(argv[1],"volatile-inventory")){char *first=snapshot(argv[2],argv[4],argv[5]);char *second=snapshot(argv[2],argv[4],argv[5]);char *inventory=volatile_inventory(argv[2],first,second,argv[3],argv[7]);emit_payload(inventory);free(inventory);free(first);free(second);return 0;}
+  if(argc==8&&!strcmp(argv[1],"volatile-inventory")){char *first=snapshot(argv[2],argv[4],argv[5]);char *second=snapshot(argv[2],argv[4],argv[5]);emit_volatile_inventory(argv[2],first,second,argv[3],argv[7]);free(first);free(second);return 0;}
   if(argc==8&&!strcmp(argv[1],"rollback")){char *first=selected_snapshot(argv[2],argv[7],argv[4],argv[5]);char *second=selected_snapshot(argv[2],argv[7],argv[4],argv[5]);if(strcmp(first,second))die("selected target drift between passes");emit_capture(argv[3],first);free(first);free(second);return 0;}
   die("unsupported bounded mode");return 20;
 }
