@@ -51,6 +51,7 @@ must re-isolate on a failed post-open check.
 - `REPLACE_EXACT_FILE`
 - `REMOVE_EXACT_ACTIVE_PLUGIN`
 - `REMOVE_EXACT_OPTION`
+- `REMOVE_EXACT_CRON_EVENT`
 - `QUARANTINE_IDENTITY_ACCESS`
 
 Executable targets precede config, database and identity stages. Every action

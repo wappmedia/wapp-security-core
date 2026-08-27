@@ -37,6 +37,7 @@ ALLOWED_PRIMITIVES = {
     "REPLACE_EXACT_FILE",
     "REMOVE_EXACT_ACTIVE_PLUGIN",
     "REMOVE_EXACT_OPTION",
+    "REMOVE_EXACT_CRON_EVENT",
     "QUARANTINE_IDENTITY_ACCESS",
     "REOPEN_ATOMIC_DOCROOT",
 }
@@ -694,6 +695,34 @@ def verify_action(action: Any, index: int) -> tuple[int, str]:
             fail(f"{label} option stage mismatch")
         if restores != "EXACT_ORIGINAL" or automatic is not True:
             fail(f"{label} option rollback contract mismatch")
+    elif primitive == "REMOVE_EXACT_CRON_EVENT":
+        exact_keys(target, {"table", "option_id", "option_name", "autoload", "events", "semantic_scope"}, f"{label}.target")
+        if target["table"] != "options" or target["option_name"] != "cron":
+            fail(f"{label} cron option identity mismatch")
+        integer(target["option_id"], f"{label}.target.option_id", minimum=1)
+        string(target["autoload"], f"{label}.target.autoload", nonempty=False)
+        if target["semantic_scope"] != "EXACT_SELECTED_EVENTS_ONLY":
+            fail(f"{label} cron semantic scope mismatch")
+        events = target["events"]
+        if not isinstance(events, list) or not events or len(events) > 64:
+            fail(f"{label}.target.events cardinality")
+        normalized = []
+        for event_index, event in enumerate(events):
+            if not isinstance(event, dict):
+                fail(f"{label}.target.events[{event_index}] invalid")
+            exact_keys(event, {"timestamp", "hook", "event_key"}, f"{label}.target.events[{event_index}]")
+            timestamp = integer(event["timestamp"], f"{label}.target.events[{event_index}].timestamp", minimum=1)
+            hook = string(event["hook"], f"{label}.target.events[{event_index}].hook")
+            event_key = string(event["event_key"], f"{label}.target.events[{event_index}].event_key")
+            if len(hook.encode("utf-8")) > 191 or len(event_key.encode("utf-8")) > 191 or any(ord(char) < 32 or ord(char) == 127 for char in hook + event_key):
+                fail(f"{label}.target.events[{event_index}] text policy")
+            normalized.append((timestamp, hook, event_key))
+        if normalized != sorted(normalized) or len(set(normalized)) != len(normalized):
+            fail(f"{label}.target.events order/duplicate")
+        if stage != "DATABASE":
+            fail(f"{label} cron stage mismatch")
+        if restores != "EXACT_ORIGINAL" or automatic is not True:
+            fail(f"{label} cron rollback contract mismatch")
     else:
         exact_keys(target, {"table", "user_id", "meta_rows", "session_policy", "incident_marker_policy"}, f"{label}.target")
         if target["table"] != "usermeta":
@@ -809,7 +838,7 @@ def verify_reopen_source_lineage(
         or plan["package"] != continuation["remediation_package"] or plan["public_core_commit"] != remediation["product_commit"]
         or not HEX64.fullmatch(string(plan["sites_config_sha256"], "continuation.coherent_plan.sites_config_sha256"))
         or plan["action_contract_sha256"] != canonical_digest(remediation_value["actions"])
-        or plan["stages"] != ["PREPARED", "FILES_APPLIED", "DB_APPLIED", "IDENTITY_APPLIED", "POSTCHECK_VERIFIED"]
+        or plan["stages"] != (["PREPARED", "FILES_APPLIED", "DB_APPLIED"] + (["CRON_APPLIED"] if any(action["primitive"] == "REMOVE_EXACT_CRON_EVENT" for action in remediation["actions"]) else []) + ["IDENTITY_APPLIED", "POSTCHECK_VERIFIED"])
         or plan["human_operator_required"] is not True or plan["bounded_consumers_own_exact_mutations"] is not True
         or plan["filesystem_database_acid_claimed"] is not False or plan["scope_expansion_allowed"] is not False
         or plan["arbitrary_sql_allowed"] is not False or plan["canonical_ready_claimed"] is not False
@@ -832,10 +861,12 @@ def verify_reopen_source_lineage(
         "REPLACE_EXACT_FILE": "BOUNDED_REPLACE_EXACT_FILE",
         "REMOVE_EXACT_ACTIVE_PLUGIN": "BOUNDED_REMOVE_EXACT_ACTIVE_PLUGIN",
         "REMOVE_EXACT_OPTION": "BOUNDED_REMOVE_EXACT_OPTION",
+        "REMOVE_EXACT_CRON_EVENT": "BOUNDED_REMOVE_EXACT_CRON_EVENT",
         "QUARANTINE_IDENTITY_ACCESS": "BOUNDED_IDENTITY_QUARANTINE",
     }
     observed_orders: list[int] = []; observed_consumers: list[str] = []; plan_dependencies: list[str] = []
     exact_file_dispatch_orders: list[list[int]] = []
+    exact_cron_dispatch_orders: list[list[int]] = []
     for index, dispatch in enumerate(dispatches):
         if not isinstance(dispatch, dict): fail("reopen coherent plan dispatch malformed")
         exact_keys(dispatch, {"order", "stage", "consumer", "action_count", "action_orders", "binding"}, f"continuation.coherent_plan.dispatch[{index}]")
@@ -857,11 +888,17 @@ def verify_reopen_source_lineage(
         if consumer == "BOUNDED_QUARANTINE_EXACT_FILE":
             verify_exact_file_binding(binding_path, remediation_value, remediation_path, orders)
             exact_file_dispatch_orders.append(orders)
+        elif consumer == "BOUNDED_REMOVE_EXACT_CRON_EVENT":
+            exact_cron_dispatch_orders.append(orders)
         plan_dependencies.append(str(binding_path))
     expected_exact_file_orders = [action["order"] for action in actions if action["primitive"] == "QUARANTINE_EXACT_FILE"]
     if ((expected_exact_file_orders and exact_file_dispatch_orders != [expected_exact_file_orders])
         or (not expected_exact_file_orders and exact_file_dispatch_orders)):
         fail("reopen exact-file actions must occupy one complete native transaction dispatch")
+    expected_exact_cron_orders = [action["order"] for action in actions if action["primitive"] == "REMOVE_EXACT_CRON_EVENT"]
+    if ((expected_exact_cron_orders and exact_cron_dispatch_orders != [expected_exact_cron_orders])
+        or (not expected_exact_cron_orders and exact_cron_dispatch_orders)):
+        fail("reopen exact-cron actions must occupy one complete bounded dispatch")
     if (observed_orders != list(range(1, len(actions) + 1)) or plan["apply_order"] != observed_consumers
         or plan["rollback_order"] != list(reversed(observed_consumers))):
         fail("reopen coherent plan complete ordering mismatch")
@@ -1349,6 +1386,19 @@ def verify_package(
         fail("quarantine targets contain duplicate physical object")
     if len(quarantine_actions) > 64:
         fail("quarantine target cardinality exceeds native bounded contract")
+    cron_actions = [action for action in actions if action["primitive"] == "REMOVE_EXACT_CRON_EVENT"]
+    if len(cron_actions) > 1:
+        fail("cron option transform must be one exact action")
+    if cron_actions:
+        cron_target = cron_actions[0]["target"]
+        if any(
+            (action["primitive"] == "REMOVE_EXACT_OPTION"
+             and (action["target"]["option_id"] == cron_target["option_id"] or action["target"]["option_name"] == "cron"))
+            or (action["primitive"] == "REMOVE_EXACT_ACTIVE_PLUGIN"
+                and action["target"]["option_id"] == cron_target["option_id"])
+            for action in actions
+        ):
+            fail("cron option authority overlaps another option-row action")
     if phase == "REOPEN":
         if value["contract"] != "HUMAN_OPERATOR_EMERGENCY_SELF_ISOLATED" or len(actions) != 1 or actions[0]["primitive"] != "REOPEN_ATOMIC_DOCROOT" or actions[0]["target"]["canonical_root"] != site["root"]:
             fail("reopen package must contain exactly one bound atomic docroot reopen")

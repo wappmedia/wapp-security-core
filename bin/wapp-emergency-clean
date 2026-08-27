@@ -82,6 +82,10 @@ for action in v['actions']:
     target=action['target']
     identity=target.get('path') or target.get('option_name') or target.get('canonical_root') or f"user_id={target.get('user_id')}"
     print(f"{action['order']}. {action['primitive']} — {identity}")
+    if action['primitive']=='REMOVE_EXACT_CRON_EVENT':
+        print("   semantic_scope="+target['semantic_scope'])
+        for event in target['events']:
+            print("   event="+json.dumps(event,sort_keys=True,separators=(',',':'),ensure_ascii=True))
 print("\nAuthority: HUMAN OPERATOR ONLY — not canonical READY/CLEAN/CLOSED")
 print(f"Required phrase inside reviewed launcher: {v['human_phrase']}")
 PY
