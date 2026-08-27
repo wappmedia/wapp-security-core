@@ -123,18 +123,22 @@ C
 # behavior, while the release helper itself is built and verified by Zig/Clang.
 cc -O2 -std=gnu11 -Wall -Wextra -Werror -Wno-error=misleading-indentation -I"$ROOT/native" "$TMP/volatile-memory-harness.c" -o "$TMP/volatile-memory-harness"
 /usr/bin/python3 - "$TMP/volatile-first.tsv" "$TMP/volatile-second.tsv" "$TMP/volatile-policy.txt" <<'PY'
-import pathlib,shutil,sys
+import hashlib,pathlib,shutil,sys
 first,second,policy=map(pathlib.Path,sys.argv[1:])
 helper='f'*64
 with first.open('w',encoding='ascii',newline='') as out:
     out.write('ROOT\t2f746d70\t2f746d70\t1\t2\t755\t0\t0\t1\t1\t1\n')
     out.write('RUNTIME\tmode\tpath\t'+helper+'\t'+helper+'\n')
-    for index in range(180_000):
-        raw=(f'p{index:06d}-'+'x'*56).encode();relative=raw.hex();absolute=(b'/tmp/'+raw).hex()
-        out.write('\t'.join(('ENTRY',relative,absolute,'REGULAR','0','0644','1000','1000','1','1','1',str(index+10),'1','-',helper,'0'))+'\n')
-    out.write('SUMMARY\t180001\t1\t180000\t180000\t0\t0\t0\t0\ttrue\t'+helper+'\n')
+    inventory=hashlib.sha256()
+    root_entry='\t'.join(('ENTRY','','2f746d70','DIRECTORY','0','755','0','0','1','1','1','2','1','-','-','0'))
+    out.write(root_entry+'\n');inventory.update((root_entry+'\n').encode())
+    for index in range(140_000):
+        raw=(f'p{index:06d}-'+'x'*88).encode();relative=raw.hex();absolute=(b'/tmp/'+raw).hex()
+        entry='\t'.join(('ENTRY',relative,absolute,'REGULAR','1','644','1000','1000','1','1','1',str(index+10),'1','-',helper,'0'))
+        out.write(entry+'\n');inventory.update((entry+'\n').encode())
+    out.write('SUMMARY\t140001\t1\t140000\t140000\t140000\t0\t0\t0\ttrue\t'+inventory.hexdigest()+'\t200000\t50000\t150000\t1073741824\t34359738368\t64\t900\t4096\t125829120\n')
 shutil.copyfile(first,second)
-policy.write_text('C:'+('p000000-'+'x'*56).encode().hex(),encoding='ascii')
+policy.write_text('C:'+('p000000-'+'x'*88).encode().hex(),encoding='ascii')
 assert first.stat().st_size < 120*1024*1024 and first.stat().st_size > 64*1024*1024
 PY
 VOLATILE_MEMORY_NONCE="$(printf volatile-memory-contract|/usr/bin/openssl dgst -sha256|/usr/bin/awk '{print $NF}')"
