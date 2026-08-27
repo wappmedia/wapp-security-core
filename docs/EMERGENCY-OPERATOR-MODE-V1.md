@@ -23,6 +23,11 @@ pinned bytes and feeds those same bytes directly to fixed `/bin/bash`; its
 pathname is never reopened after verification. The launcher must request the
 package-bound human phrase and enforce its own
 preflight, isolation, stability, mutation, recurrence and postcheck contracts.
+The sanitized launcher environment retains only the already validated physical
+Private `reports` root. Public Core opens the exact reviewed launcher below that
+user-owned, non-writable runtime root through a no-symlink descriptor walk before
+pinning its bytes; arbitrary temporary roots and launchers outside the bound
+Private release remain rejected.
 The generic CLI also requires that exact package-bound phrase from a fresh
 interactive terminal; approval cannot be supplied through argv or environment.
 

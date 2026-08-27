@@ -44,10 +44,12 @@ ROOT="$SOURCE_ROOT"
 MODEL="$ROOT/lib/emergency-operator-v1.py"
 CLI="$ROOT/bin/wapp-emergency-clean"
 CLOSURE="$ROOT/bin/wapp-closure-check"
-TMP="$(mktemp -d 2>/dev/null||mktemp -d -t wapp-emergency-v1)";trap 'rm -rf "$TMP" "${WAPP_EMERGENCY_TEST_OUTER_TMP:-}"' EXIT
+TMP_RAW="$(mktemp -d 2>/dev/null||mktemp -d -t wapp-emergency-v1)"
+TMP="$(cd "$TMP_RAW"&&pwd -P)";trap 'rm -rf "$TMP" "${WAPP_EMERGENCY_TEST_OUTER_TMP:-}"' EXIT
 source "$ROOT/lib/recovery-integrity.sh"
-export WAPP_EMERGENCY_REPORTS_ROOT="$TMP/reports"
-domain='operator-fixture.test';run="$TMP/run with spaces";mkdir -p "$run" "$WAPP_EMERGENCY_REPORTS_ROOT/.control/emergency-operator-v1"
+runtime_root="$TMP/reviewed private release"
+export WAPP_EMERGENCY_REPORTS_ROOT="$runtime_root/reports"
+domain='operator-fixture.test';run="$runtime_root/run with spaces";mkdir -p "$run" "$WAPP_EMERGENCY_REPORTS_ROOT/.control/emergency-operator-v1"
 fail(){ printf 'FAIL: %s\n' "$1" >&2;exit 1; };pass(){ printf 'PASS: %s\n' "$1"; };sign(){ chmod 600 "$1";recovery_sign_file "$1">/dev/null; }
 expect_fail(){ local label="$1";shift;if "$@" >/dev/null 2>&1;then fail "$label accepted";fi;pass "$label"; }
 expect_exact_fail(){ local label="$1" expected="$2" output;shift 2;output="$TMP/$label.err";if "$@" >/dev/null 2>"$output";then fail "$label accepted";fi;grep -Fqx "$expected" "$output"||fail "$label wrong failure class";pass "$label"; }
@@ -110,10 +112,11 @@ cat >"$run/launcher" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ "${1:-}" == --execute && "${2:-}" =~ ^[a-f0-9]{64}$ ]]||exit 20
+[[ "${WAPP_EMERGENCY_REPORTS_ROOT:-}" == /*/reports ]]||exit 20
 if [[ -n "${WAPP_TEST_CLOSURE_REPLAY_PROBE:-}" ]];then
   : >"$WAPP_TEST_CLOSURE_REPLAY_PROBE"
 fi
-printf 'SYNTHETIC REVIEWED LAUNCHER — NO TARGET ACCESS\n'
+printf 'SYNTHETIC REVIEWED LAUNCHER — NO TARGET ACCESS\nREPORTS_ROOT=%s\n' "$WAPP_EMERGENCY_REPORTS_ROOT"
 EOF
 chmod 700 "$run/launcher"
 for file in "$run/incident.json" "$run/prestate.json" "$run/rollback-index.json" "$run/forensic.json" "$run/rollback.json" "$run/launcher";do sign "$file";done
@@ -319,7 +322,28 @@ if process.returncode==0 or b'SYNTHETIC REVIEWED LAUNCHER' in output: raise Syst
 PY
 pass post_human_dependency_drift
 printf '{"tool":"synthetic","schema":1,"domain":"%s","root":"/home/user_42/app_42","name":"incident"}\n' "$domain" >"$run/incident.json";sign "$run/incident.json"
-python3 "$MODEL" exec-launcher --launcher "$run/launcher" --sha256 "$(recovery_sha256_file "$run/launcher")" --package-sha256 "$package_sha" >"$TMP/execute.out";grep -Fq 'SYNTHETIC REVIEWED LAUNCHER — NO TARGET ACCESS' "$TMP/execute.out"||fail pinned_launcher_execution;pass pinned_launcher_execution
+launcher_sha="$(recovery_sha256_file "$run/launcher")"
+python3 "$MODEL" exec-launcher --launcher "$run/launcher" --sha256 "$launcher_sha" --package-sha256 "$package_sha" >"$TMP/execute.out"
+grep -Fq 'SYNTHETIC REVIEWED LAUNCHER — NO TARGET ACCESS' "$TMP/execute.out"||fail pinned_launcher_execution
+grep -Fqx "REPORTS_ROOT=$WAPP_EMERGENCY_REPORTS_ROOT" "$TMP/execute.out"||fail package_bound_reports_handoff
+pass pinned_launcher_execution
+pass package_bound_reports_handoff
+expect_fail missing_reports_handoff env -u WAPP_EMERGENCY_REPORTS_ROOT python3 "$MODEL" exec-launcher --launcher "$run/launcher" --sha256 "$launcher_sha" --package-sha256 "$package_sha"
+expect_fail nonnormalized_reports_handoff env WAPP_EMERGENCY_REPORTS_ROOT="$runtime_root/./reports" python3 "$MODEL" exec-launcher --launcher "$run/launcher" --sha256 "$launcher_sha" --package-sha256 "$package_sha"
+mkdir -p "$TMP/outside-runtime";cp "$run/launcher" "$TMP/outside-runtime/launcher";chmod 700 "$TMP/outside-runtime/launcher"
+expect_fail launcher_outside_package_runtime python3 "$MODEL" exec-launcher --launcher "$TMP/outside-runtime/launcher" --sha256 "$launcher_sha" --package-sha256 "$package_sha"
+mkdir -p "$runtime_root/physical-parent";cp "$run/launcher" "$runtime_root/physical-parent/launcher";chmod 700 "$runtime_root/physical-parent/launcher";ln -s physical-parent "$runtime_root/symlink-parent"
+expect_fail launcher_symlink_parent python3 "$MODEL" exec-launcher --launcher "$runtime_root/symlink-parent/launcher" --sha256 "$launcher_sha" --package-sha256 "$package_sha"
+rm "$runtime_root/symlink-parent"
+chmod 0777 "$runtime_root/physical-parent"
+expect_fail writable_launcher_parent python3 "$MODEL" exec-launcher --launcher "$runtime_root/physical-parent/launcher" --sha256 "$launcher_sha" --package-sha256 "$package_sha"
+chmod 0755 "$runtime_root/physical-parent"
+mv "$WAPP_EMERGENCY_REPORTS_ROOT" "$runtime_root/reports.physical";ln -s reports.physical "$WAPP_EMERGENCY_REPORTS_ROOT"
+expect_fail reports_handoff_symlink python3 "$MODEL" exec-launcher --launcher "$run/launcher" --sha256 "$launcher_sha" --package-sha256 "$package_sha"
+rm "$WAPP_EMERGENCY_REPORTS_ROOT";mv "$runtime_root/reports.physical" "$WAPP_EMERGENCY_REPORTS_ROOT"
+runtime_mode="$(stat -f %Lp "$runtime_root")";chmod 0777 "$runtime_root"
+expect_fail writable_package_runtime python3 "$MODEL" exec-launcher --launcher "$run/launcher" --sha256 "$launcher_sha" --package-sha256 "$package_sha"
+chmod "$runtime_mode" "$runtime_root"
 build_consumed_reopen_fixture
 expect_fail consumed_remediation_replay python3 "$MODEL" verify-package --package "$package" --domain "$domain" --now-epoch "$now"
 [[ "$(python3 "$MODEL" verify-package --package "$reopen" --domain "$domain" --now-epoch "$now" | python3 -c 'import json,sys;print(json.load(sys.stdin)["human_phrase"])')" == "ÅTERÖPPNA $domain ${reopen_sha:0:12}" ]] || fail reopen_phrase;pass separate_reopen_contract

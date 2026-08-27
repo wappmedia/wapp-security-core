@@ -2831,17 +2831,106 @@ def verify_closure(path: Path, domain: str, *, now: int | None = None) -> dict[s
     }
 
 
+def open_package_bound_launcher(path: Path) -> tuple[int, os.stat_result, os.stat_result, str]:
+    reports_raw = os.environ.get("WAPP_EMERGENCY_REPORTS_ROOT", "")
+    if (
+        not reports_raw.startswith("/")
+        or reports_raw == "/"
+        or os.path.normpath(reports_raw) != reports_raw
+        or Path(reports_raw).name != "reports"
+    ):
+        fail("package-bound reports root is invalid")
+    reports = Path(reports_raw)
+    runtime = reports.parent
+    launcher_raw = str(path)
+    if (
+        not launcher_raw.startswith("/")
+        or launcher_raw == "/"
+        or os.path.normpath(launcher_raw) != launcher_raw
+    ):
+        fail("launcher path must be normalized absolute")
+    try:
+        relative = path.relative_to(runtime)
+    except ValueError:
+        fail("launcher is outside package-bound runtime root")
+    if not relative.parts or any(part in ("", ".", "..") for part in relative.parts):
+        fail("launcher relative path is invalid")
+
+    directory_flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        directory_flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        directory_flags |= os.O_NOFOLLOW
+    file_flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        file_flags |= os.O_NOFOLLOW
+
+    descriptors: list[int] = []
+    try:
+        current = os.open("/", directory_flags)
+        descriptors.append(current)
+        runtime_parts = runtime.parts[1:]
+        for index, component in enumerate(runtime_parts):
+            current = os.open(component, directory_flags, dir_fd=current)
+            descriptors.append(current)
+            current_state = os.fstat(current)
+            if (
+                index < len(runtime_parts) - 1
+                and current_state.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+                and not current_state.st_mode & stat.S_ISVTX
+            ):
+                fail("package-bound runtime ancestor is writable without sticky protection")
+        runtime_state = os.fstat(current)
+        if (
+            not stat.S_ISDIR(runtime_state.st_mode)
+            or runtime_state.st_uid != os.getuid()
+            or runtime_state.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        ):
+            fail("package-bound runtime root is not trusted")
+        reports_descriptor = os.open("reports", directory_flags, dir_fd=current)
+        descriptors.append(reports_descriptor)
+        reports_state = os.fstat(reports_descriptor)
+        if (
+            not stat.S_ISDIR(reports_state.st_mode)
+            or reports_state.st_uid != os.getuid()
+            or reports_state.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        ):
+            fail("package-bound reports root is not trusted")
+
+        launcher_parent = current
+        for component in relative.parts[:-1]:
+            launcher_parent = os.open(component, directory_flags, dir_fd=launcher_parent)
+            descriptors.append(launcher_parent)
+            parent_state = os.fstat(launcher_parent)
+            if (
+                parent_state.st_uid != os.getuid()
+                or parent_state.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+            ):
+                fail("launcher parent is not trusted")
+        descriptor = os.open(relative.parts[-1], file_flags, dir_fd=launcher_parent)
+        before = os.fstat(descriptor)
+        return descriptor, before, runtime_state, reports_raw
+    except OSError as error:
+        fail(f"cannot resolve package-bound runtime launcher: {error}")
+    finally:
+        for item in reversed(descriptors):
+            try:
+                os.close(item)
+            except OSError:
+                pass
+
+
 def execute_pinned_launcher(path: Path, expected_sha: str, package_sha: str) -> int:
     digest(expected_sha, "launcher.sha256")
     digest(package_sha, "package.sha256")
+    descriptor, before, _runtime_state, reports_root = open_package_bound_launcher(path)
     try:
-        flags = os.O_RDONLY
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        descriptor = os.open(str(path), flags)
         try:
-            before = os.fstat(descriptor)
-            if not stat.S_ISREG(before.st_mode) or before.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or before.st_uid != os.getuid()
+                or before.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+            ):
                 fail("launcher descriptor is not a trusted regular file")
             chunks: list[bytes] = []
             while True:
@@ -2880,6 +2969,7 @@ def execute_pinned_launcher(path: Path, expected_sha: str, package_sha: str) -> 
                 "USER": os.environ.get("USER", ""),
                 "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
                 "LC_ALL": "C",
+                "WAPP_EMERGENCY_REPORTS_ROOT": reports_root,
             }
             os.execve("/bin/bash", ["/bin/bash", "/dev/fd/9", "--execute", package_sha], environment)
     except OSError as error:
