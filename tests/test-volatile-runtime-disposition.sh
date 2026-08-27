@@ -14,6 +14,13 @@ fail(){ printf 'FAIL: %s\n' "$1" >&2;exit 1; }
 expect_fail(){ local name="$1";shift;if "$@" >"$TMP/$name.out" 2>"$TMP/$name.err";then fail "$name accepted";fi; }
 sha_text(){ printf %s "$1"|/usr/bin/openssl dgst -sha256|/usr/bin/awk '{print $NF}'; }
 
+/usr/bin/python3 - "$ROOT/lib/volatile-runtime-disposition.py" <<'PY'
+import pathlib,sys
+source=pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')
+assert 'counts[2] > 150_000' in source and 'counts[4] > 34_359_738_368' in source
+assert 'counts[2] > 100_000' not in source and 'counts[4] > 8_589_934_592' not in source
+PY
+
 operation1="$(sha_text operation-one)";operation2="$(sha_text operation-two)"
 read -r OBS1 OBS2 PROVENANCE_TIME ISSUED FUTURE_OBS1 FUTURE_OBS2 FUTURE_PROVENANCE FUTURE_ISSUED <<<"$(/usr/bin/python3 - <<'PY'
 import datetime as d

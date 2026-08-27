@@ -399,7 +399,7 @@ def parse_candidate(path: pathlib.Path, disposition: dict[str, object]) -> tuple
     directories = [row for row in entries.values() if row[3] == "DIRECTORY"]
     uploads = [row for row in entries.values() if row[15] == "1"]
     expected_counts = [len(entries), len(directories), len(regular), len(regular), sum(int(row[4]) for row in regular), len(uploads), 0]
-    if counts != expected_counts or counts[0] > 200_000 or counts[1] > 50_000 or counts[2] > 100_000 or counts[4] > 8_589_934_592 or summary[10] != inventory_hash:
+    if counts != expected_counts or counts[0] > 200_000 or counts[1] > 50_000 or counts[2] > 150_000 or counts[4] > 34_359_738_368 or summary[10] != inventory_hash:
         fail("volatile inventory candidate summary derivation mismatch")
     root_entry = entries.get("")
     expected_root_entry_metadata = [root[5], root[6], root[7], root[9], root[10], root[3], root[4], root[8]]
