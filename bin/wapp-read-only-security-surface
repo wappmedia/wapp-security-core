@@ -4,11 +4,19 @@ umask 077
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.."&&pwd)"
 MODEL="$ROOT/lib/read-only-security-surface.py"
 RULESET="$ROOT/config/read-only-security-surface-ruleset.json"
+NATIVE_POLICY="$ROOT/config/native-filesystem-helper.json"
 source "$ROOT/lib/recovery-integrity.sh"
 fail(){ printf 'read-only-security-surface: %s\n' "$1" >&2;exit 20; }
 PYTHON="$(recovery_trusted_fixed_python)"||fail 'trusted local Python unavailable'
 COMMIT="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null)";VERSION="$(tr -d '[:space:]'<"$ROOT/VERSION")"
 signed(){ [[ "$1" == /*&&-f "$1"&&! -L "$1"&&-f "$1.hmac"&&! -L "$1.hmac" ]]&&recovery_verify_file "$1" "$1.hmac"; }
+signed_dependencies(){
+  local mode="$1" list path;shift
+  list="$(mktemp 2>/dev/null||mktemp -t wapp-security-surface-dependencies)"||fail 'dependency list allocation failed'
+  if ! PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$MODEL" "$mode" "$@" >"$list";then rm -f "$list";fail 'dependency contract invalid';fi
+  while IFS= read -r path;do [[ -n "$path" ]]||continue;signed "$path"||{ rm -f "$list";fail 'signed dependency invalid'; };done <"$list"
+  rm -f "$list"
+}
 publish(){
   local staged="$1" output="$2"
   recovery_sign_file "$staged" "$staged.hmac" >/dev/null||fail 'artifact signing failed'
@@ -16,17 +24,11 @@ publish(){
   mv "$staged" "$output";mv "$staged.hmac" "$output.hmac"
 }
 case "${1:-}" in
-  capture-create)
-    [[ $# -eq 11&&"${2:-}" == --inventory-rows&&"${4:-}" == --observed-at&&"${6:-}" == --expires-at&&"${8:-}" == --capture-nonce&&"${10:-}" == --output ]]||fail 'invalid capture-create invocation'
-    rows="$3";observed="$5";expires="$7";nonce="$9";output="${11}"
-    [[ "$rows" == /*&&"$output" == /*&&-f "$rows"&&! -L "$rows" ]]||fail 'invalid capture paths'
-    tmp="$(mktemp -d 2>/dev/null||mktemp -d -t wapp-security-surface)";trap 'rm -rf "$tmp"' EXIT
-    PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$MODEL" capture-create "$rows" "$observed" "$expires" "$nonce" "$COMMIT" "$VERSION" "$tmp/capture.json"||fail 'capture binding failed'
-    publish "$tmp/capture.json" "$output";trap - EXIT;rmdir "$tmp";printf 'READ_ONLY_NATIVE_CAPTURE_BINDING_CREATED: %s\n' "$output"
-    ;;
   capture-verify)
     [[ $# -eq 3&&"${2:-}" == --artifact&&"${3:-}" == /* ]]||fail 'invalid capture-verify invocation'
-    signed "$3"||fail 'capture signature invalid';PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$MODEL" capture-verify "$3" "$COMMIT" "$VERSION"
+    signed "$3"||fail 'capture signature invalid'
+    signed_dependencies capture-dependencies "$3" "$COMMIT" "$VERSION" "$NATIVE_POLICY" "$RULESET"
+    PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$MODEL" capture-verify "$3" "$COMMIT" "$VERSION" "$NATIVE_POLICY" "$RULESET"
     ;;
   create)
     [[ $# -eq 9&&"${2:-}" == --capture&&"${4:-}" == --provenance&&"${6:-}" == --generated-at&&"${8:-}" == --output ]]||fail 'invalid create invocation'
@@ -34,13 +36,21 @@ case "${1:-}" in
     [[ "$capture" == /*&&"$provenance" == /*&&"$output" == /* ]]||fail 'absolute artifact paths required'
     signed "$capture"||fail 'capture signature invalid';signed "$provenance"||fail 'provenance signature invalid'
     "$0" capture-verify --artifact "$capture" >/dev/null||fail 'capture contract invalid'
+    signed_dependencies provenance-dependencies "$capture" "$provenance" "$COMMIT" "$VERSION" "$NATIVE_POLICY" "$RULESET"
     tmp="$(mktemp -d 2>/dev/null||mktemp -d -t wapp-security-surface)";trap 'rm -rf "$tmp"' EXIT
-    PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$MODEL" create "$capture" "$provenance" "$RULESET" "$generated" "$COMMIT" "$VERSION" "$tmp/surface.json"||fail 'surface derivation failed'
+    PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$MODEL" create "$capture" "$provenance" "$RULESET" "$NATIVE_POLICY" "$generated" "$COMMIT" "$VERSION" "$tmp/surface.json"||fail 'surface derivation failed'
     publish "$tmp/surface.json" "$output";trap - EXIT;rmdir "$tmp";printf 'READ_ONLY_SECURITY_SURFACE_CREATED: %s\n' "$output"
     ;;
   verify)
     [[ $# -eq 3&&"${2:-}" == --artifact&&"${3:-}" == /* ]]||fail 'invalid verify invocation'
-    signed "$3"||fail 'surface signature invalid';PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$MODEL" verify "$3" "$COMMIT" "$VERSION"
+    signed "$3"||fail 'surface signature invalid'
+    list="$(mktemp 2>/dev/null||mktemp -t wapp-security-surface-roots)"||fail 'dependency list allocation failed'
+    PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$MODEL" surface-dependencies "$3" "$COMMIT" "$VERSION" "$NATIVE_POLICY" >"$list"||{ rm -f "$list";fail 'surface dependency contract invalid'; }
+    exec 3<"$list";IFS= read -r capture <&3;IFS= read -r provenance <&3;exec 3<&-;rm -f "$list"
+    signed "$capture"||fail 'capture signature invalid';signed "$provenance"||fail 'provenance signature invalid'
+    signed_dependencies capture-dependencies "$capture" "$COMMIT" "$VERSION" "$NATIVE_POLICY" "$RULESET"
+    signed_dependencies provenance-dependencies "$capture" "$provenance" "$COMMIT" "$VERSION" "$NATIVE_POLICY" "$RULESET"
+    PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$MODEL" verify "$3" "$COMMIT" "$VERSION" "$NATIVE_POLICY"
     ;;
-  *)fail 'usage: wapp-read-only-security-surface capture-create|capture-verify|create|verify';;
+  *)fail 'usage: wapp-read-only-security-surface capture-verify|create|verify';;
 esac

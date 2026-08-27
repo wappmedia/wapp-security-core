@@ -11,7 +11,7 @@ import pathlib
 import re
 import stat
 import sys
-from typing import Any, Optional
+from typing import Any
 
 
 HEX = re.compile(r"^(?:[a-f0-9]{2})*$")
@@ -251,54 +251,119 @@ def validate_release(commit: str, version: str) -> None:
         fail("invalid Public Core version")
 
 
-def capture_derive(rows_path: pathlib.Path, observed_at: str, expires_at: str, nonce: str, commit: str, version: str) -> dict[str, Any]:
-    validate_release(commit, version)
-    if not HEX64.fullmatch(nonce):
-        fail("invalid capture nonce")
-    observed, expires = timestamp(observed_at, "observation timestamp"), timestamp(expires_at, "capture expiry")
-    if expires <= observed or expires - observed > dt.timedelta(minutes=30):
-        fail("capture lifetime invalid")
-    raw = read_regular(rows_path)
-    inventory = parse_inventory(raw)
-    return {
-        "tool": "wapp-security-native-inventory-capture-binding", "schema": 1,
-        "contract": "COMPLETE_BOUNDED_DESCRIPTOR_NOFOLLOW_TWO_PASS_V1",
-        "classification_scope": "INVENTORY_ONLY_NO_DISPOSITION_V1",
-        "observed_at": observed_at, "expires_at": expires_at, "capture_nonce": nonce,
-        "public_core": {"commit": commit, "version": version},
-        "root_path_hex": inventory["root_path_hex"], "physical_root_hex": inventory["physical_root_hex"],
-        "root_identity": inventory["root_identity"], "runtime_mode": inventory["runtime_mode"],
-        "runtime_path_hex": inventory["runtime_path_hex"], "helper_sha256": inventory["helper_sha256"],
-        "runtime_identity_sha256": inventory["runtime_identity_sha256"],
-        "inventory_rows": reference(rows_path, raw), "inventory_commitment_sha256": inventory["inventory_commitment_sha256"],
-        "entry_count": inventory["counts"][0], "unresolved_count": inventory["unresolved_count"],
-        "uncovered_path_count": inventory["uncovered_path_count"], "coverage_complete": inventory["coverage_complete"],
-        "authority": FALSE_AUTHORITY,
-    }
+def product_seal(value: dict[str, Any], raw: bytes, commit: str, version: str, project_root: pathlib.Path) -> None:
+    exact_keys(value, {"tool", "schema", "generated_at", "version", "git", "discovery_policy", "component_count", "components", "local_only", "site_credentials_used"}, "Product Seal")
+    git = exact_keys(value.get("git"), {"branch", "commit", "clean"}, "Product Seal git")
+    if value["tool"] != "wapp-security-product-seal" or value["schema"] != 2 or value["version"] != version or git.get("commit") != commit or git.get("clean") is not True or value["local_only"] is not True or value["site_credentials_used"] is not False:
+        fail("Product Seal identity mismatch")
+    components = value.get("components")
+    if not isinstance(components, list) or value.get("component_count") != len(components):
+        fail("Product Seal component count mismatch")
+    indexed: dict[str, dict[str, Any]] = {}
+    for component in components:
+        exact_keys(component, {"path", "sha256", "bytes"}, "Product Seal component")
+        path = component["path"]
+        if not isinstance(path, str) or path.startswith("/") or pathlib.PurePosixPath(path).as_posix() != path or path in indexed or not HEX64.fullmatch(component["sha256"]) or not isinstance(component["bytes"], int) or component["bytes"] < 1:
+            fail("Product Seal component invalid")
+        indexed[path] = component
+    if list(indexed) != sorted(indexed):
+        fail("Product Seal component ordering invalid")
+    manifest_path = project_root / "config/canonical-components.txt"
+    manifest_raw = read_regular(manifest_path, 1024 * 1024)
+    try:
+        manifest_lines = manifest_raw.decode("utf-8", "strict").splitlines()
+    except UnicodeError:
+        fail("canonical component manifest encoding invalid")
+    canonical_paths = [line for line in manifest_lines if line and not line.startswith("#")]
+    if len(canonical_paths) != len(set(canonical_paths)) or any(path.startswith("/") or pathlib.PurePosixPath(path).as_posix() != path for path in canonical_paths):
+        fail("canonical component manifest invalid")
+    required = set(canonical_paths) | {"VERSION", "bin/wapp-package-audit", "bin/wapp-public-data-boundary", "bin/wapp-release-check", "bin/wapp-test", "config/canonical-components.txt"}
+    if set(indexed) != required:
+        fail("Product Seal canonical component set mismatch")
+    expected_policy = "tracked runtime toolchain: root launchers + install/update + bin/wapp dispatcher + bin/wapp-* + lib runtime + native helper source/build/encoded artifact/policy + release-sealed trust policy + VERSION + canonical surface manifest; sites.csv excluded"
+    if value["discovery_policy"] != expected_policy:
+        fail("Product Seal discovery policy mismatch")
+    for relative in required:
+        candidate = project_root / relative
+        current = read_regular(candidate, 2 * 1024 * 1024)
+        if indexed[relative] != {"path": relative, "sha256": sha(current), "bytes": len(current)}:
+            fail("Product Seal current component substitution")
 
 
-def capture_verify(value: dict[str, Any], current_commit: Optional[str] = None, current_version: Optional[str] = None, *, require_current: bool = False) -> tuple[dict[str, Any], dict[str, Any]]:
-    expected_keys = {"tool", "schema", "contract", "classification_scope", "observed_at", "expires_at", "capture_nonce", "public_core", "root_path_hex", "physical_root_hex", "root_identity", "runtime_mode", "runtime_path_hex", "helper_sha256", "runtime_identity_sha256", "inventory_rows", "inventory_commitment_sha256", "entry_count", "unresolved_count", "uncovered_path_count", "coverage_complete", "authority"}
+def capture_verify(value: dict[str, Any], current_commit: str, current_version: str, native_policy_path: pathlib.Path, ruleset_path: pathlib.Path, *, require_current: bool = False) -> tuple[dict[str, Any], dict[str, Any]]:
+    expected_keys = {"tool", "schema", "contract", "classification_scope", "observed_at", "expires_at", "capture_nonce", "public_core", "public_product_seal", "source_collection_evidence", "native_policy", "collection_lifecycle", "root_path_hex", "physical_root_hex", "root_identity", "runtime_mode", "runtime_path_hex", "helper_sha256", "runtime_identity_sha256", "inventory_rows", "inventory_commitment_sha256", "entry_count", "unresolved_count", "uncovered_path_count", "coverage_complete", "authority"}
     exact_keys(value, expected_keys, "capture")
     if value["tool"] != "wapp-security-native-inventory-capture-binding" or value["schema"] != 1 or value["contract"] != "COMPLETE_BOUNDED_DESCRIPTOR_NOFOLLOW_TWO_PASS_V1" or value["classification_scope"] != "INVENTORY_ONLY_NO_DISPOSITION_V1":
         fail("capture type mismatch")
     if value["authority"] != FALSE_AUTHORITY:
         fail("capture authority invalid")
+    validate_release(current_commit, current_version)
     rows_path, rows_raw = validate_reference(value["inventory_rows"], "capture inventory")
+    source_path, source_raw = validate_reference(value["source_collection_evidence"], "source collection evidence")
     public = exact_keys(value["public_core"], {"commit", "version"}, "capture public_core")
-    if current_commit is not None or current_version is not None:
-        validate_release(str(current_commit), str(current_version))
-        if public != {"commit": current_commit, "version": current_version}:
-            fail("cross-release capture substitution")
-    expected = capture_derive(rows_path, value["observed_at"], value["expires_at"], value["capture_nonce"], public["commit"], public["version"])
-    if canonical(value) != canonical(expected):
-        fail("capture derivation mismatch")
+    if public != {"commit": current_commit, "version": current_version}:
+        fail("cross-release capture substitution")
+    product_path, product_raw = validate_reference(value["public_product_seal"], "public Product Seal")
+    product_value, loaded_product_raw = load(product_path)
+    if product_raw != loaded_product_raw:
+        fail("Product Seal read substitution")
+    project_root = ruleset_path.parent.parent
+    product_seal(product_value, product_raw, current_commit, current_version, project_root)
+    policy_path, policy_raw = validate_reference(value["native_policy"], "native policy")
+    if policy_path != native_policy_path or value["native_policy"] != reference(native_policy_path, read_regular(native_policy_path)):
+        fail("native policy path or release substitution")
+    policy, loaded_policy_raw = load(policy_path)
+    if policy_raw != loaded_policy_raw or policy.get("tool") != "wapp-security-native-filesystem-helper-policy" or policy.get("schema") != 3 or policy.get("binary_sha256") != value["helper_sha256"]:
+        fail("released native helper identity mismatch")
+    inventory = parse_inventory(rows_raw)
+    derived = {
+        "root_path_hex": inventory["root_path_hex"], "physical_root_hex": inventory["physical_root_hex"],
+        "root_identity": inventory["root_identity"], "runtime_mode": inventory["runtime_mode"],
+        "runtime_path_hex": inventory["runtime_path_hex"], "helper_sha256": inventory["helper_sha256"],
+        "runtime_identity_sha256": inventory["runtime_identity_sha256"],
+        "inventory_commitment_sha256": inventory["inventory_commitment_sha256"], "entry_count": inventory["counts"][0],
+        "unresolved_count": inventory["unresolved_count"], "uncovered_path_count": inventory["uncovered_path_count"],
+        "coverage_complete": inventory["coverage_complete"],
+    }
+    for key, expected in derived.items():
+        if value[key] != expected:
+            fail(f"capture {key} derivation mismatch")
+    if not HEX64.fullmatch(value["capture_nonce"]):
+        fail("capture nonce invalid")
+    observed, expires = timestamp(value["observed_at"], "capture observation"), timestamp(value["expires_at"], "capture expiry")
+    if expires <= observed or expires - observed > dt.timedelta(minutes=30):
+        fail("capture lifetime invalid")
+    lifecycle = exact_keys(value["collection_lifecycle"], {"bootstrap_assurance", "server_temp_files_created", "target_host_ephemeral_bootstrap_modified", "target_filesystem_modified", "wordpress_filesystem_modified", "database_modified", "customer_configuration_modified", "ephemeral_cleanup_verified", "wordpress_executed", "php_executed"}, "collection lifecycle")
+    common_false = ("wordpress_filesystem_modified", "database_modified", "customer_configuration_modified", "wordpress_executed", "php_executed")
+    if any(lifecycle[key] is not False for key in common_false) or lifecycle["ephemeral_cleanup_verified"] is not True:
+        fail("collection lifecycle mutation/execution mismatch")
+    if lifecycle["bootstrap_assurance"] == "TRUSTED_MEMFD_LAUNCHER":
+        expected_flags = (False, False, False)
+    elif lifecycle["bootstrap_assurance"] == "DEGRADED_ASSURANCE_EPHEMERAL_BOOTSTRAP":
+        expected_flags = (True, True, True)
+    else:
+        fail("collection bootstrap assurance invalid")
+    if tuple(lifecycle[key] for key in ("server_temp_files_created", "target_host_ephemeral_bootstrap_modified", "target_filesystem_modified")) != expected_flags:
+        fail("collection lifecycle assurance semantics mismatch")
+    source, loaded_source_raw = load(source_path)
+    exact_keys(source, {"tool", "schema", "contract", "observed_at", "expires_at", "capture_nonce", "inventory_rows", "root_path_hex", "physical_root_hex", "root_identity", "runtime_mode", "runtime_path_hex", "helper_sha256", "runtime_identity_sha256", "inventory_commitment_sha256", "collection_lifecycle", "authority"}, "source collection evidence")
+    if loaded_source_raw != source_raw or source["tool"] != "wapp-security-native-inventory-collection-evidence" or source["schema"] != 1 or source["contract"] != "COMPLETE_BOUNDED_DESCRIPTOR_NOFOLLOW_TWO_PASS_V1" or source["authority"] != FALSE_AUTHORITY:
+        fail("source collection evidence type or authority invalid")
+    source_expected = {
+        "observed_at": value["observed_at"], "expires_at": value["expires_at"], "capture_nonce": value["capture_nonce"],
+        "inventory_rows": value["inventory_rows"], "root_path_hex": value["root_path_hex"], "physical_root_hex": value["physical_root_hex"],
+        "root_identity": value["root_identity"], "runtime_mode": value["runtime_mode"], "runtime_path_hex": value["runtime_path_hex"],
+        "helper_sha256": value["helper_sha256"], "runtime_identity_sha256": value["runtime_identity_sha256"],
+        "inventory_commitment_sha256": value["inventory_commitment_sha256"], "collection_lifecycle": value["collection_lifecycle"],
+    }
+    if any(source[key] != expected for key, expected in source_expected.items()):
+        fail("source collection evidence substitution")
     if require_current:
         now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
         observed, expires = timestamp(value["observed_at"], "capture observation"), timestamp(value["expires_at"], "capture expiry")
         if now < observed - dt.timedelta(seconds=60) or now > expires:
             fail("capture is not current")
-    return expected, parse_inventory(rows_raw)
+    return value, inventory
 
 
 def ruleset(path: pathlib.Path) -> tuple[dict[str, Any], bytes]:
@@ -322,9 +387,14 @@ def ruleset(path: pathlib.Path) -> tuple[dict[str, Any], bytes]:
     return value, raw
 
 
-def provenance(value: dict[str, Any], capture_path: pathlib.Path, capture_raw: bytes, capture: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    exact_keys(value, {"tool", "schema", "contract", "generated_at", "expires_at", "capture", "authority", "records"}, "provenance")
-    if value["tool"] != "wapp-security-read-only-surface-provenance" or value["schema"] != 1 or value["contract"] != "READ_ONLY_SECURITY_SURFACE_PROVENANCE_V1" or value["authority"] != FALSE_AUTHORITY:
+def regular_set_commitment(inventory: dict[str, Any]) -> str:
+    rows = [path_hex + "\t" + entry["sha256"] for path_hex, entry in inventory["entries"].items() if entry["type"] == "REGULAR"]
+    return sha(("\n".join(sorted(rows)) + "\n").encode("ascii"))
+
+
+def provenance(value: dict[str, Any], capture_path: pathlib.Path, capture_raw: bytes, capture: dict[str, Any], inventory: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], list[pathlib.Path]]:
+    exact_keys(value, {"tool", "schema", "contract", "scope_mode", "regular_file_set_sha256", "record_set_sha256", "generated_at", "expires_at", "capture", "authority", "records"}, "provenance")
+    if value["tool"] != "wapp-security-read-only-surface-provenance" or value["schema"] != 1 or value["contract"] != "READ_ONLY_SECURITY_SURFACE_PROVENANCE_V1" or value["scope_mode"] != "COMPLETE_CURRENT_REGULAR_FILE_SET_V1" or value["authority"] != FALSE_AUTHORITY:
         fail("provenance type or authority invalid")
     generated, expires = timestamp(value["generated_at"], "provenance timestamp"), timestamp(value["expires_at"], "provenance expiry")
     capture_observed, capture_expires = timestamp(capture["observed_at"], "capture observation"), timestamp(capture["expires_at"], "capture expiry")
@@ -333,23 +403,39 @@ def provenance(value: dict[str, Any], capture_path: pathlib.Path, capture_raw: b
     ref = exact_keys(value["capture"], {"bytes", "path", "sha256"}, "provenance capture")
     if ref != reference(capture_path, capture_raw):
         fail("provenance capture substitution")
+    if value["regular_file_set_sha256"] != regular_set_commitment(inventory):
+        fail("provenance regular-file scope substitution")
     records = value["records"]
     if not isinstance(records, list) or len(records) > MAX_OBJECTS:
         fail("provenance record cap")
-    indexed: dict[str, dict[str, Any]] = {}
+    indexed: dict[str, dict[str, Any]] = {}; dependencies: list[pathlib.Path] = []
     for record in records:
-        exact_keys(record, {"path_hex", "sha256", "disposition", "source_kind", "source_identity_sha256"}, "provenance record")
+        exact_keys(record, {"path_hex", "sha256", "disposition", "source_kind", "source_identity_sha256", "source_artifact"}, "provenance record")
         path_hex = record["path_hex"]
         decode_relative(path_hex)
-        if path_hex in indexed or not HEX64.fullmatch(record["sha256"]) or not HEX64.fullmatch(record["source_identity_sha256"]) or (record["disposition"], record["source_kind"]) not in PROVENANCE:
+        source_path, source_raw = validate_reference(record["source_artifact"], "provenance source")
+        source_value, loaded_source_raw = load(source_path)
+        exact_keys(source_value, {"tool", "schema", "contract", "observed_at", "expires_at", "capture", "path_hex", "sha256", "disposition", "source_kind", "authority"}, "provenance source artifact")
+        source_observed = timestamp(source_value["observed_at"], "provenance source observation")
+        source_expires = timestamp(source_value["expires_at"], "provenance source expiry")
+        if source_value["tool"] != "wapp-security-read-only-surface-source-evidence" or source_value["schema"] != 1 or source_value["contract"] != "READ_ONLY_SECURITY_SURFACE_SOURCE_EVIDENCE_V1" or source_value["authority"] != FALSE_AUTHORITY:
+            fail("provenance source type or authority invalid")
+        if source_value["capture"] != reference(capture_path, capture_raw) or source_observed < timestamp(capture["observed_at"], "capture observation") or source_expires <= source_observed or source_expires > timestamp(capture["expires_at"], "capture expiry"):
+            fail("provenance source currentness or capture substitution")
+        expected_source = {key: record[key] for key in ("path_hex", "sha256", "disposition", "source_kind")}
+        if {key: source_value[key] for key in expected_source} != expected_source:
+            fail("provenance source record substitution")
+        if loaded_source_raw != source_raw or record["source_identity_sha256"] != sha(source_raw) or path_hex in indexed or not HEX64.fullmatch(record["sha256"]) or (record["disposition"], record["source_kind"]) not in PROVENANCE:
             fail("provenance record invalid")
-        indexed[path_hex] = record
+        indexed[path_hex] = record;dependencies.append(source_path)
     if records != [indexed[key] for key in sorted(indexed)]:
         fail("provenance ordering invalid")
-    return indexed
+    if value["record_set_sha256"] != sha(canonical(records)):
+        fail("provenance record-set commitment mismatch")
+    return indexed, dependencies
 
 
-def classify(entry: dict[str, Any], path_hex: str, rule: dict[str, Any], record: dict[str, Any] | None) -> dict[str, Any] | None:
+def classify(entry: dict[str, Any], path_hex: str, rule: dict[str, Any], record: dict[str, Any] | None) -> dict[str, Any]:
     relative = entry["relative"]
     lower = relative.lower()
     text = lower.decode("utf-8", "surrogateescape")
@@ -360,10 +446,7 @@ def classify(entry: dict[str, Any], path_hex: str, rule: dict[str, Any], record:
     runtime_root = next((root for root in rule["wordpress_runtime_roots"] if text == root or text.startswith(root + "/")), None)
     dropin = text in set(rule["wordpress_dropins"])
     malicious_rule = rule["malicious_index"].get(entry["sha256"])
-    applicable = executable or config or runtime_root is not None or dropin or malicious_rule is not None or record is not None
-    if not applicable:
-        return None
-    object_class = "CONFIG" if config else "DROPIN" if dropin else "RUNTIME" if runtime_root else "EXECUTABLE" if executable else "PROVENANCE_BOUND_OBJECT"
+    object_class = "CONFIG" if config else "DROPIN" if dropin else "RUNTIME" if runtime_root else "EXECUTABLE" if executable else "REGULAR_CONTENT"
     location = "UPLOADS" if entry["uploads"] else "ROOT" if b"/" not in relative else "WORDPRESS_RUNTIME" if runtime_root or dropin else "OTHER"
     rules: list[str] = []
     result = "UNRESOLVED"
@@ -397,10 +480,10 @@ def classify(entry: dict[str, Any], path_hex: str, rule: dict[str, Any], record:
     }
 
 
-def surface_derive(capture_path: pathlib.Path, provenance_path: pathlib.Path, ruleset_path: pathlib.Path, generated_at: str, current_commit: str, current_version: str) -> dict[str, Any]:
+def surface_derive(capture_path: pathlib.Path, provenance_path: pathlib.Path, ruleset_path: pathlib.Path, native_policy_path: pathlib.Path, generated_at: str, current_commit: str, current_version: str) -> dict[str, Any]:
     validate_release(current_commit, current_version)
     capture_value, capture_raw = load(capture_path)
-    capture, inventory = capture_verify(capture_value, current_commit, current_version, require_current=True)
+    capture, inventory = capture_verify(capture_value, current_commit, current_version, native_policy_path, ruleset_path, require_current=True)
     if capture["public_core"] != {"commit": current_commit, "version": current_version}:
         fail("cross-release capture substitution")
     generated = timestamp(generated_at, "surface timestamp")
@@ -411,7 +494,7 @@ def surface_derive(capture_path: pathlib.Path, provenance_path: pathlib.Path, ru
     if generated < observed or generated > capture_expiry:
         fail("surface currentness invalid")
     provenance_value, provenance_raw = load(provenance_path)
-    records = provenance(provenance_value, capture_path, capture_raw, capture)
+    records, _ = provenance(provenance_value, capture_path, capture_raw, capture, inventory)
     provenance_expiry = timestamp(provenance_value["expires_at"], "provenance expiry")
     if generated > provenance_expiry:
         fail("provenance stale")
@@ -421,9 +504,7 @@ def surface_derive(capture_path: pathlib.Path, provenance_path: pathlib.Path, ru
     for path_hex in sorted(entries):
         entry = entries[path_hex]
         if entry["type"] == "REGULAR" and entry["sha256"] != "-":
-            classified = classify(entry, path_hex, rule, records.get(path_hex))
-            if classified is not None:
-                objects.append(classified)
+            objects.append(classify(entry, path_hex, rule, records.get(path_hex)))
     missing = sorted(set(records) - set(entries))
     for path_hex in missing:
         record = records[path_hex]
@@ -467,7 +548,7 @@ def surface_derive(capture_path: pathlib.Path, provenance_path: pathlib.Path, ru
     }
 
 
-def surface_verify(value: dict[str, Any], current_commit: str, current_version: str) -> dict[str, Any]:
+def surface_verify(value: dict[str, Any], current_commit: str, current_version: str, native_policy_path: pathlib.Path) -> dict[str, Any]:
     if value.get("tool") != "wapp-security-read-only-security-surface" or value.get("schema") != 1:
         fail("surface type invalid")
     public = exact_keys(value.get("public_core"), {"commit", "version"}, "surface public_core")
@@ -477,7 +558,7 @@ def surface_verify(value: dict[str, Any], current_commit: str, current_version: 
     capture_path, _ = validate_reference(value.get("capture"), "surface capture")
     provenance_path, _ = validate_reference(value.get("provenance"), "surface provenance")
     ruleset_path, _ = validate_reference(value.get("ruleset"), "surface ruleset")
-    expected = surface_derive(capture_path, provenance_path, ruleset_path, str(value.get("generated_at", "")), public["commit"], public["version"])
+    expected = surface_derive(capture_path, provenance_path, ruleset_path, native_policy_path, str(value.get("generated_at", "")), public["commit"], public["version"])
     if canonical(value) != canonical(expected):
         fail("surface derivation mismatch")
     now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
@@ -507,18 +588,37 @@ def write_exclusive(path: pathlib.Path, payload: bytes) -> None:
 
 def main() -> int:
     try:
-        if len(sys.argv) == 9 and sys.argv[1] == "capture-create":
-            rows, observed, expires, nonce, commit, version, output = sys.argv[2:]
-            write_exclusive(pathlib.Path(output), canonical(capture_derive(pathlib.Path(rows), observed, expires, nonce, commit, version)))
+        if len(sys.argv) == 7 and sys.argv[1] in {"capture-verify", "capture-dependencies"}:
+            artifact, commit, version, policy_path, ruleset_path = sys.argv[2:]
+            value, _ = load(pathlib.Path(artifact))
+            capture_verify(value, commit, version, pathlib.Path(policy_path), pathlib.Path(ruleset_path), require_current=True)
+            if sys.argv[1] == "capture-dependencies":
+                for key in ("inventory_rows", "public_product_seal", "source_collection_evidence"):
+                    print(value[key]["path"])
+            else:
+                print("READ_ONLY_NATIVE_CAPTURE_BINDING: VERIFIED_NON_AUTHORIZING")
             return 0
-        if len(sys.argv) == 5 and sys.argv[1] == "capture-verify":
-            value, _ = load(pathlib.Path(sys.argv[2])); capture_verify(value, sys.argv[3], sys.argv[4], require_current=True); print("READ_ONLY_NATIVE_CAPTURE_BINDING: VERIFIED_NON_AUTHORIZING"); return 0
-        if len(sys.argv) == 9 and sys.argv[1] == "create":
-            capture, provenance_path, ruleset_path, generated, commit, version, output = sys.argv[2:]
-            write_exclusive(pathlib.Path(output), canonical(surface_derive(pathlib.Path(capture), pathlib.Path(provenance_path), pathlib.Path(ruleset_path), generated, commit, version)))
+        if len(sys.argv) == 8 and sys.argv[1] == "provenance-dependencies":
+            capture_path, provenance_path, commit, version, policy_path, ruleset_path = sys.argv[2:]
+            capture_value, capture_raw = load(pathlib.Path(capture_path))
+            capture, inventory = capture_verify(capture_value, commit, version, pathlib.Path(policy_path), pathlib.Path(ruleset_path), require_current=True)
+            provenance_value, _ = load(pathlib.Path(provenance_path))
+            _, dependencies = provenance(provenance_value, pathlib.Path(capture_path), capture_raw, capture, inventory)
+            for path in sorted(set(dependencies)):
+                print(path)
             return 0
-        if len(sys.argv) == 5 and sys.argv[1] == "verify":
-            value, _ = load(pathlib.Path(sys.argv[2])); verified = surface_verify(value, sys.argv[3], sys.argv[4]); print(f"READ_ONLY_SECURITY_SURFACE_V1: {verified['state']}"); return 0
+        if len(sys.argv) == 10 and sys.argv[1] == "create":
+            capture, provenance_path, ruleset_path, policy_path, generated, commit, version, output = sys.argv[2:]
+            write_exclusive(pathlib.Path(output), canonical(surface_derive(pathlib.Path(capture), pathlib.Path(provenance_path), pathlib.Path(ruleset_path), pathlib.Path(policy_path), generated, commit, version)))
+            return 0
+        if len(sys.argv) == 6 and sys.argv[1] in {"verify", "surface-dependencies"}:
+            value, _ = load(pathlib.Path(sys.argv[2]))
+            verified = surface_verify(value, sys.argv[3], sys.argv[4], pathlib.Path(sys.argv[5]))
+            if sys.argv[1] == "surface-dependencies":
+                print(value["capture"]["path"]); print(value["provenance"]["path"])
+            else:
+                print(f"READ_ONLY_SECURITY_SURFACE_V1: {verified['state']}")
+            return 0
         fail("usage")
     except Invalid as error:
         print(f"read-only-security-surface: {error}", file=sys.stderr)
