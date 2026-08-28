@@ -447,7 +447,7 @@ def parse_candidate(path: pathlib.Path, disposition: dict[str, object]) -> tuple
         fail("volatile inventory disposition token invalid")
     if header != ["VOLATILE_RUNTIME_CANDIDATE", "BOUNDED_VOLATILE_RUNTIME_CANDIDATE_V1", token_sha, str(len(disposition.get("paths", []))), "VISIBLE", "UNVERIFIED_NON_AUTHORIZING"]:
         fail("volatile inventory candidate disposition binding invalid")
-    expected_paths: dict[str, str] = {}
+    expected_paths: dict[str, tuple[str, dict[str, object]]] = {}
     behavior_map = {
         "CTIME_ONLY": "CTIME_ONLY",
         "APPEND_PREFIX_REQUIRED_LOG_GROWTH": "APPEND_PREFIX_VERIFIED_LOG_GROWTH",
@@ -459,13 +459,14 @@ def parse_candidate(path: pathlib.Path, disposition: dict[str, object]) -> tuple
     for row in disposition_paths:
         if not isinstance(row, dict) or not isinstance(row.get("normalized_path_hex"), str) or row.get("behavior") not in behavior_map:
             fail("volatile inventory disposition row invalid")
-        expected_paths[row["normalized_path_hex"]] = behavior_map[row["behavior"]]
+        expected_paths[row["normalized_path_hex"]] = (behavior_map[row["behavior"]], row)
     if set(candidate_paths) != set(expected_paths):
         fail("volatile inventory candidate path scope mismatch")
     bound_paths: list[dict[str, object]] = []
     for path_hex in sorted(expected_paths):
         behavior_value, observed = candidate_paths[path_hex]
-        if behavior_value != expected_paths[path_hex]:
+        expected_behavior, disposition_row = expected_paths[path_hex]
+        if behavior_value != expected_behavior:
             fail("volatile inventory candidate behavior mismatch")
         entry = entries.get(path_hex)
         if entry is None or entry[3] != "REGULAR" or entry[14] == "-" or not HEX64.fullmatch(entry[14]):
@@ -475,12 +476,38 @@ def parse_candidate(path: pathlib.Path, disposition: dict[str, object]) -> tuple
                 fail("volatile inventory candidate executable rejected")
         except ValueError:
             fail("volatile inventory candidate mode invalid")
-        bound_paths.append({
+        bound: dict[str, object] = {
             "normalized_path_hex": path_hex,
             "behavior": behavior_value,
             "observation": observed,
             "visible_entry_sha256": hashlib.sha256(("\t".join(entry) + "\n").encode("ascii")).hexdigest(),
-        })
+        }
+        if disposition_row.get("disposition") == "UNATTRIBUTED_CTIME_ONLY_SECURITY_STATE_UNCHANGED":
+            observed_state = disposition_row.get("observed_state")
+            minimum_ctime = disposition_row.get("minimum_current_ctime_ns")
+            candidate_state = {
+                "device": int(entry[10]),
+                "gid": int(entry[7]),
+                "inode": int(entry[11]),
+                "mode": format(int(entry[5], 8), "o"),
+                "mtime_ns": int(entry[8]),
+                "nlink": int(entry[12]),
+                "sha256": entry[14],
+                "size": int(entry[4]),
+                "symlink_target_hex": None if entry[13] == "-" else entry[13],
+                "type": entry[3],
+                "uid": int(entry[6]),
+                "uploads": entry[15] == "1",
+            }
+            if not isinstance(observed_state, dict) or candidate_state != observed_state or not isinstance(minimum_ctime, int) or int(entry[9]) < minimum_ctime:
+                fail("high-sensitivity current visible state drift")
+            bound.update({
+                "state_disposition": disposition_row["disposition"],
+                "writer_attribution": "UNATTRIBUTED",
+                "content_security_classification": "REQUIRED_SEPARATELY",
+                "observed_state_sha256": disposition_row["observed_state_sha256"],
+            })
+        bound_paths.append(bound)
     return {
         "capture_nonce": nonce,
         "root_path_hex": root[1],
@@ -537,7 +564,54 @@ def inventory_verify(value: dict[str, object]) -> dict[str, object]:
     return expected
 
 
-def derive(first_path: pathlib.Path, second_path: pathlib.Path, provenance_path: pathlib.Path, issued_at: str) -> dict[str, object]:
+def high_sensitivity_state(path_hex: str, left: dict[str, object], right: dict[str, object]) -> dict[str, object]:
+    if decode_rel(path_hex) != b"wp-config.php":
+        fail("high-sensitivity ctime scope must be exact canonical wp-config.php")
+    states = (left.get("pass1"), left.get("pass2"), right.get("pass1"), right.get("pass2"))
+    if any(not isinstance(value, dict) for value in states):
+        fail("high-sensitivity observation state missing")
+    first = states[0]
+    assert isinstance(first, dict)
+    required = {"ctime_ns", "device", "gid", "inode", "mode", "mtime_ns", "nlink", "sha256", "size", "symlink_target_hex", "type", "uid", "uploads"}
+    if set(first) != required or any(set(value) != required for value in states if isinstance(value, dict)):
+        fail("high-sensitivity observation state contract invalid")
+    if first.get("type") != "REGULAR" or first.get("symlink_target_hex") is not None or first.get("uploads") is not False or first.get("nlink") != 1 or not isinstance(first.get("sha256"), str) or not HEX64.fullmatch(str(first.get("sha256"))):
+        fail("high-sensitivity file identity invalid")
+    try:
+        if int(str(first.get("mode")), 8) & 0o111:
+            fail("high-sensitivity executable mode rejected")
+        ctimes = [int(str(value["ctime_ns"])) for value in states if isinstance(value, dict)]
+    except (KeyError, TypeError, ValueError):
+        fail("high-sensitivity metadata invalid")
+    if any(state_without_ctime(value) != state_without_ctime(first) for value in states[1:] if isinstance(value, dict)):
+        fail("high-sensitivity observed security state changed")
+    if any(after < before for before, after in zip(ctimes, ctimes[1:])) or len(set(ctimes)) < 2:
+        fail("high-sensitivity ctime sequence invalid")
+    stable_state = state_without_ctime(first)
+    stable_state["mode"] = format(int(str(stable_state["mode"]), 8), "o")
+    return {
+        "normalized_path_hex": path_hex,
+        "disposition": "UNATTRIBUTED_CTIME_ONLY_SECURITY_STATE_UNCHANGED",
+        "behavior": "CTIME_ONLY",
+        "sensitivity": "WORDPRESS_CONFIGURATION",
+        "writer_attribution": "UNATTRIBUTED",
+        "observed_state_contract": "EXACT_REGULAR_FILE_IDENTITY_AND_CONTENT_EXCEPT_CTIME_V1",
+        "observed_state_fields": sorted(stable_state),
+        "observed_state": stable_state,
+        "observed_state_sha256": hashlib.sha256(canonical(stable_state)).hexdigest(),
+        "observed_ctime_sequence_sha256": hashlib.sha256(canonical(ctimes)).hexdigest(),
+        "minimum_current_ctime_ns": ctimes[-1],
+        "signed_observation_state_count": len(states),
+        "content_security_classification": "REQUIRED_SEPARATELY",
+        "future_change_authorized": False,
+        "security_attribute_observation": {
+            "acl": "NOT_DESCRIPTOR_BOUND_BY_SOURCE_CONTRACT",
+            "xattr": "NOT_DESCRIPTOR_BOUND_BY_SOURCE_CONTRACT",
+        },
+    }
+
+
+def derive(first_path: pathlib.Path, second_path: pathlib.Path, provenance_path: pathlib.Path, issued_at: str, high_sensitivity_path: str | None = None) -> dict[str, object]:
     first, first_raw = diagnostic(first_path)
     second, second_raw = diagnostic(second_path)
     if first_path == second_path or hashlib.sha256(first_raw).digest() == hashlib.sha256(second_raw).digest():
@@ -585,8 +659,17 @@ def derive(first_path: pathlib.Path, second_path: pathlib.Path, provenance_path:
                 fail("ctime observation continuity invalid")
         elif first_post != second_pre:
             fail("log observation boundary is not byte-exact")
+    high_hex: str | None = None
+    if high_sensitivity_path is not None:
+        raw_high = high_sensitivity_path.encode("utf-8")
+        if raw_high != b"wp-config.php":
+            fail("high-sensitivity relative path invalid")
+        high_hex = raw_high.hex()
+        if high_hex not in left or left[high_hex][0] != "CTIME_ONLY":
+            fail("high-sensitivity wp-config ctime-only observation required")
     proven, provenance_value, provenance_raw = provenance(provenance_path)
-    if set(proven) != set(left) or provenance_value["root_path_hex"] != first["root_path_hex"]:
+    runtime_paths = set(left) - ({high_hex} if high_hex is not None else set())
+    if set(proven) != runtime_paths or provenance_value["root_path_hex"] != first["root_path_hex"]:
         fail("provenance scope mismatch")
     provenance_time = parse_time(provenance_value["generated_at"], "provenance timestamp")
     if provenance_time < first_time or provenance_time > issued:
@@ -595,6 +678,10 @@ def derive(first_path: pathlib.Path, second_path: pathlib.Path, provenance_path:
     token_parts: list[str] = []
     for path_hex in sorted(left):
         derived_behavior = left[path_hex][0]
+        if path_hex == high_hex:
+            token_parts.append("C:" + path_hex)
+            paths.append(high_sensitivity_state(path_hex, left[path_hex][1], right[path_hex][1]))
+            continue
         expected_role = "APPEND_ONLY_LOG" if derived_behavior in ("APPEND_PREFIX_REQUIRED_LOG_GROWTH", "APPEND_PREFIX_REQUIRED_UPLOAD_LOG_GROWTH") else "GENERATED_RUNTIME_STATE"
         if proven[path_hex]["runtime_role"] != expected_role:
             fail("runtime role/behavior mismatch")
@@ -614,11 +701,11 @@ def derive(first_path: pathlib.Path, second_path: pathlib.Path, provenance_path:
     if len(token) > 32768:
         fail("helper policy token cap")
     expires = issued + dt.timedelta(hours=2)
-    return {
+    result: dict[str, object] = {
         "tool": "wapp-security-bounded-volatile-runtime-disposition",
         "schema": 1,
-        "contract": "BOUNDED_VOLATILE_RUNTIME_DISPOSITION_V1",
-        "disposition": "VOLATILE_RUNTIME_VERIFIED",
+        "contract": "BOUNDED_VOLATILE_RUNTIME_DISPOSITION_V1" if high_hex is None else "BOUNDED_RUNTIME_AND_HIGH_SENSITIVITY_CTIME_STATE_DISPOSITION_V1",
+        "disposition": "VOLATILE_RUNTIME_VERIFIED" if high_hex is None else "RUNTIME_PROVENANCE_AND_UNATTRIBUTED_CTIME_STATE_VERIFIED",
         "authority": {"apply": False, "clean": False, "closure": False, "mutation": False, "prepare": False, "ready": False, "remediation": False},
         "decision_eligible": False,
         "filesystem_coverage_weakened": False,
@@ -637,6 +724,15 @@ def derive(first_path: pathlib.Path, second_path: pathlib.Path, provenance_path:
         "helper_policy_token_sha256": hashlib.sha256(token.encode("ascii")).hexdigest(),
         "paths": paths,
     }
+    if high_hex is not None:
+        result["high_sensitivity_state_equivalence"] = {
+            "normalized_path_hex": high_hex,
+            "semantic": "SECURITY_RELEVANT_OBSERVED_FILE_STATE_UNCHANGED_WITH_UNATTRIBUTED_CTIME_ONLY_DRIFT",
+            "writer_legitimacy_claimed": False,
+            "provenance_known": False,
+            "decision_eligible": False,
+        }
+    return result
 
 
 def verify(value: dict[str, object]) -> dict[str, object]:
@@ -653,7 +749,18 @@ def verify(value: dict[str, object]) -> dict[str, object]:
         raw = read_regular(pathlib.Path(ref["path"]))
         if len(raw) != ref["bytes"] or hashlib.sha256(raw).hexdigest() != ref["sha256"]:
             fail("artifact dependency substitution")
-    expected = derive(pathlib.Path(diagnostics[0]["path"]), pathlib.Path(diagnostics[1]["path"]), pathlib.Path(provenance_ref["path"]), str(value.get("issued_at", "")))
+    high_scope = value.get("high_sensitivity_state_equivalence")
+    high_path: str | None = None
+    if high_scope is not None:
+        if not isinstance(high_scope, dict) or set(high_scope) != {"decision_eligible", "normalized_path_hex", "provenance_known", "semantic", "writer_legitimacy_claimed"}:
+            fail("high-sensitivity state-equivalence scope invalid")
+        if high_scope.get("decision_eligible") is not False or high_scope.get("writer_legitimacy_claimed") is not False or high_scope.get("provenance_known") is not False or high_scope.get("semantic") != "SECURITY_RELEVANT_OBSERVED_FILE_STATE_UNCHANGED_WITH_UNATTRIBUTED_CTIME_ONLY_DRIFT":
+            fail("high-sensitivity state-equivalence semantics invalid")
+        path_hex = high_scope.get("normalized_path_hex")
+        if not isinstance(path_hex, str) or decode_rel(path_hex) != b"wp-config.php":
+            fail("high-sensitivity state-equivalence path invalid")
+        high_path = "wp-config.php"
+    expected = derive(pathlib.Path(diagnostics[0]["path"]), pathlib.Path(diagnostics[1]["path"]), pathlib.Path(provenance_ref["path"]), str(value.get("issued_at", "")), high_path)
     if canonical(value) != canonical(expected):
         fail("artifact derivation mismatch")
     return expected
@@ -682,6 +789,10 @@ def main() -> None:
     if len(sys.argv) == 7 and sys.argv[1] == "create":
         first, second, provenance_path, issued, output = map(pathlib.Path, (sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6]))
         write_exclusive(output, canonical(derive(first, second, provenance_path, str(issued))))
+        return
+    if len(sys.argv) == 8 and sys.argv[1] == "create-high-sensitivity-ctime":
+        first, second, provenance_path, issued, high_path, output = map(pathlib.Path, (sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6], sys.argv[7]))
+        write_exclusive(output, canonical(derive(first, second, provenance_path, str(issued), str(high_path))))
         return
     if len(sys.argv) == 3 and sys.argv[1] in ("verify", "dependencies", "policy-token"):
         artifact = pathlib.Path(sys.argv[2])

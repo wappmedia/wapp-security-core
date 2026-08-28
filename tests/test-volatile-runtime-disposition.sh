@@ -33,6 +33,7 @@ root_path=/tmp/provider-neutral/site-root
 root_hex="$(printf %s "$root_path"|/usr/bin/xxd -p -c 9999)"
 log_path='wp-content/uploads/wc-logs/runtime-2026-08-24.log';log_hex="$(printf %s "$log_path"|/usr/bin/xxd -p -c 9999)"
 waf_path='wp-content/wflogs/config-livewaf.php';waf_hex="$(printf %s "$waf_path"|/usr/bin/xxd -p -c 9999)"
+config_path='wp-config.php';config_hex="$(printf %s "$config_path"|/usr/bin/xxd -p -c 9999)"
 uploads_root_hex="$(printf %s 'wp-content/uploads/wc-logs'|/usr/bin/xxd -p -c 9999)"
 waf_root_hex="$(printf %s 'wp-content/wflogs'|/usr/bin/xxd -p -c 9999)"
 helper_sha="$(/usr/bin/python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["binary_sha256"])' "$POLICY")"
@@ -107,6 +108,86 @@ assert v['disposition']=='VOLATILE_RUNTIME_VERIFIED' and v['paths_remain_visible
 assert v['decision_eligible'] is False and set(v['authority'].values())=={False}
 assert [x['behavior'] for x in v['paths']]==['APPEND_PREFIX_REQUIRED_UPLOAD_LOG_GROWTH','CTIME_ONLY']
 PY
+
+# An exact canonical high-sensitivity wp-config.php may use the same native
+# CTIME_ONLY enforcement without claiming that its unknown writer is
+# legitimate. All observable file identity/content fields except ctime remain
+# byte-exact across both signed observations and their boundary.
+make_high_sensitivity_raw(){
+  local source="$1" output="$2" before="$3" after="$4"
+  /usr/bin/python3 - "$source" "$output" "$config_hex" "$before" "$after" <<'PY'
+import hashlib,pathlib,sys
+source,output,path,before,after=sys.argv[1:]
+lines=pathlib.Path(source).read_text().splitlines();header=lines[1].split('\t');header[12]=str(int(header[12])+1);lines[1]='\t'.join(header)
+digest=hashlib.sha256(b'exact high sensitivity config').hexdigest()
+row=['DRIFT',path,'MODIFIED','true','true','REGULAR','11','909','2777','0664','1000','1000','1','400',before,digest,'-','0','REGULAR','11','909','2777','0664','1000','1000','1','400',after,digest,'-','0']
+rows=sorted(lines[2:]+['\t'.join(row)],key=lambda value:value.split('\t')[1]);pathlib.Path(output).write_text('\n'.join(lines[:2]+rows)+'\n')
+PY
+}
+make_high_sensitivity_raw "$TMP/raw1.tsv" "$TMP/high-raw1.tsv" 100 101
+make_high_sensitivity_raw "$TMP/raw2.tsv" "$TMP/high-raw2.tsv" 101 201
+"$DIAG" create --raw "$TMP/high-raw1.tsv" --root "$root_path" --operation-id "$operation1" --observed-at "$OBS1" --product-seal "$TMP/product-seal.json" --output "$TMP/high-diag1.json" >/dev/null
+"$DIAG" create --raw "$TMP/high-raw2.tsv" --root "$root_path" --operation-id "$operation2" --observed-at "$OBS2" --product-seal "$TMP/product-seal.json" --output "$TMP/high-diag2.json" >/dev/null
+"$TOOL" create-high-sensitivity-ctime --diagnostic-one "$TMP/high-diag1.json" --diagnostic-two "$TMP/high-diag2.json" --runtime-provenance "$TMP/provenance.json" --high-sensitivity-relative-path wp-config.php --issued-at "$ISSUED" --output "$TMP/high-disposition.json" >/dev/null
+"$TOOL" verify --artifact "$TMP/high-disposition.json"|grep -Fq VERIFIED_NON_AUTHORIZING
+high_policy_value="$("$TOOL" policy-token --artifact "$TMP/high-disposition.json")"
+[[ "$high_policy_value" == "C:$config_hex,A:$log_hex,C:$waf_hex" ]]||fail high_policy_value
+/usr/bin/python3 - "$TMP/high-disposition.json" "$config_hex" "$(sha_text 'exact high sensitivity config')" <<'PY'
+import json,sys
+v=json.load(open(sys.argv[1]));path=sys.argv[2];expected_sha=sys.argv[3]
+assert v['contract']=='BOUNDED_RUNTIME_AND_HIGH_SENSITIVITY_CTIME_STATE_DISPOSITION_V1'
+assert v['disposition']=='RUNTIME_PROVENANCE_AND_UNATTRIBUTED_CTIME_STATE_VERIFIED'
+scope=v['high_sensitivity_state_equivalence'];assert scope['normalized_path_hex']==path
+assert scope['semantic']=='SECURITY_RELEVANT_OBSERVED_FILE_STATE_UNCHANGED_WITH_UNATTRIBUTED_CTIME_ONLY_DRIFT'
+assert scope['writer_legitimacy_claimed'] is False and scope['provenance_known'] is False and scope['decision_eligible'] is False
+row=next(x for x in v['paths'] if x['normalized_path_hex']==path)
+assert row['disposition']=='UNATTRIBUTED_CTIME_ONLY_SECURITY_STATE_UNCHANGED'
+assert row['writer_attribution']=='UNATTRIBUTED' and row['future_change_authorized'] is False
+assert row['content_security_classification']=='REQUIRED_SEPARATELY'
+assert row['signed_observation_state_count']==4 and len(row['observed_state_fields'])==12
+assert len(row['observed_state_sha256'])==64 and len(row['observed_ctime_sequence_sha256'])==64
+assert row['observed_state']['sha256']==expected_sha and row['minimum_current_ctime_ns']==201
+assert row['security_attribute_observation']=={'acl':'NOT_DESCRIPTOR_BOUND_BY_SOURCE_CONTRACT','xattr':'NOT_DESCRIPTOR_BOUND_BY_SOURCE_CONTRACT'}
+assert v['paths_remain_visible'] is True and v['filesystem_coverage_weakened'] is False and v['decision_eligible'] is False
+assert set(v['authority'].values())=={False}
+PY
+
+# Every observable high-sensitivity property is fail-closed. The synthetic
+# change is applied to observation two pass-1 and pass-2 so the ordinary
+# repeated behavior remains well-formed while the cross-observation boundary
+# proves the prohibited state change.
+for spec in 'size:8:2778:21:2778' 'inode:7:910:20:910' 'mode:9:0600:22:0600' 'uid:10:1001:23:1001' 'gid:11:1001:24:1001' 'nlink:12:2:25:2' 'mtime:13:401:26:401' 'hash:15:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff:28:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff';do
+  IFS=: read -r name first_index first_value second_index second_value <<<"$spec"
+  /usr/bin/python3 - "$TMP/high-raw2.tsv" "$TMP/high-$name.tsv" "$config_hex" "$first_index" "$first_value" "$second_index" "$second_value" <<'PY'
+import pathlib,sys
+source,out,path,i1,v1,i2,v2=sys.argv[1:];lines=pathlib.Path(source).read_text().splitlines()
+for index,line in enumerate(lines):
+ fields=line.split('\t')
+ if fields[0]=='DRIFT' and fields[1]==path:fields[int(i1)]=v1;fields[int(i2)]=v2;lines[index]='\t'.join(fields)
+pathlib.Path(out).write_text('\n'.join(lines)+'\n')
+PY
+  "$DIAG" create --raw "$TMP/high-$name.tsv" --root "$root_path" --operation-id "$operation2" --observed-at "$OBS2" --product-seal "$TMP/product-seal.json" --output "$TMP/high-$name.json" >/dev/null
+  expect_fail "high_$name" "$TOOL" create-high-sensitivity-ctime --diagnostic-one "$TMP/high-diag1.json" --diagnostic-two "$TMP/high-$name.json" --runtime-provenance "$TMP/provenance.json" --high-sensitivity-relative-path wp-config.php --issued-at "$ISSUED" --output "$TMP/high-$name-disposition.json"
+done
+
+# A REGULAR diagnostic row without a real content digest is valid diagnostic
+# incompleteness, but it can never support the stronger exact content-state
+# claim or emit its native CTIME policy token.
+for ordinal in 1 2;do
+  /usr/bin/python3 - "$TMP/high-raw$ordinal.tsv" "$TMP/high-no-hash$ordinal.tsv" "$config_hex" <<'PY'
+import pathlib,sys
+source,out,path=sys.argv[1:];lines=pathlib.Path(source).read_text().splitlines()
+for index,line in enumerate(lines):
+ fields=line.split('\t')
+ if fields[0]=='DRIFT' and fields[1]==path:
+  fields[15]='-';fields[28]='-';lines[index]='\t'.join(fields)
+pathlib.Path(out).write_text('\n'.join(lines)+'\n')
+PY
+done
+"$DIAG" create --raw "$TMP/high-no-hash1.tsv" --root "$root_path" --operation-id "$operation1" --observed-at "$OBS1" --product-seal "$TMP/product-seal.json" --output "$TMP/high-no-hash1.json" >/dev/null
+"$DIAG" create --raw "$TMP/high-no-hash2.tsv" --root "$root_path" --operation-id "$operation2" --observed-at "$OBS2" --product-seal "$TMP/product-seal.json" --output "$TMP/high-no-hash2.json" >/dev/null
+expect_fail high_missing_content_hash "$TOOL" create-high-sensitivity-ctime --diagnostic-one "$TMP/high-no-hash1.json" --diagnostic-two "$TMP/high-no-hash2.json" --runtime-provenance "$TMP/provenance.json" --high-sensitivity-relative-path wp-config.php --issued-at "$ISSUED" --output "$TMP/high-no-hash-disposition.json"
+expect_fail high_arbitrary_path "$TOOL" create-high-sensitivity-ctime --diagnostic-one "$TMP/high-diag1.json" --diagnostic-two "$TMP/high-diag2.json" --runtime-provenance "$TMP/provenance.json" --high-sensitivity-relative-path wp-settings.php --issued-at "$ISSUED" --output "$TMP/high-arbitrary.json"
 
 # Ephemeral bootstrap identity is operation-scoped: two separately created,
 # verified and cleaned launchers may have different inodes while their release
@@ -203,6 +284,59 @@ v=json.load(open(sys.argv[1]));assert v['contract']=='BOUNDED_VOLATILE_RUNTIME_I
 assert v['paths_remain_visible'] is True and v['filesystem_coverage_weakened'] is False and v['decision_eligible'] is False
 assert set(v['authority'].values())=={False} and len(v['paths'])==2
 PY
+
+# The high-sensitivity row remains visible in the complete inventory and is
+# consumed by the same exact native C:path policy without becoming authority.
+abs_config_hex="$(printf %s "$root_path/$config_path"|/usr/bin/xxd -p -c 9999)";config_sha="$(sha_text 'exact high sensitivity config')";high_token_sha="$(sha_text "$high_policy_value")"
+/usr/bin/python3 - "$TMP/candidate.tsv" "$TMP/high-candidate.tsv" "$config_hex" "$abs_config_hex" "$config_sha" "$high_token_sha" <<'PY'
+import hashlib,pathlib,sys
+source,out,rel,absolute,digest,token_sha=sys.argv[1:];lines=pathlib.Path(source).read_text().splitlines();result=[]
+for line in lines:
+ if line.startswith('ROOT\t'):
+  result.append('\t'.join(('ENTRY',rel,absolute,'REGULAR','2777','0664','1000','1000','400','401','11','909','1','-',digest,'0')))
+ if line.startswith('VOLATILE_RUNTIME_CANDIDATE\t'):
+  fields=line.split('\t');fields[2]=token_sha;fields[3]='3';line='\t'.join(fields)
+ result.append(line)
+ if line.startswith('VOLATILE_RUNTIME_CANDIDATE_PATH\t') and line.split('\t')[1] < rel:continue
+ if line.startswith('VOLATILE_RUNTIME_CANDIDATE_PATH\t') and not any(x.startswith('VOLATILE_RUNTIME_CANDIDATE_PATH\t'+rel+'\t') for x in result):
+  result.insert(len(result)-1,'\t'.join(('VOLATILE_RUNTIME_CANDIDATE_PATH',rel,'CTIME_ONLY','OBSERVED_DRIFT')))
+entries=sorted(x for x in result if x.startswith('ENTRY\t'));first_entry=next(i for i,x in enumerate(result) if x.startswith('ENTRY\t'));result=[x for x in result if not x.startswith('ENTRY\t')];result[first_entry:first_entry]=entries
+inventory_hash=hashlib.sha256(''.join(x+'\n' for x in entries).encode()).hexdigest()
+for index,line in enumerate(result):
+ if line.startswith('SUMMARY\t'):
+  fields=line.split('\t');fields[1]='5';fields[3]='4';fields[4]='4';fields[5]=str(int(fields[5])+2777);fields[10]=inventory_hash;result[index]='\t'.join(fields)
+pathlib.Path(out).write_text('\n'.join(result)+'\n')
+PY
+"$TOOL" inventory-create --raw-candidate "$TMP/high-candidate.tsv" --disposition "$TMP/high-disposition.json" --output "$TMP/high-inventory.json" >/dev/null
+"$TOOL" inventory-verify --artifact "$TMP/high-inventory.json"|grep -Fq VERIFIED_NON_AUTHORIZING
+/usr/bin/python3 - "$TMP/high-inventory.json" "$config_hex" <<'PY'
+import json,sys
+v=json.load(open(sys.argv[1]));row=next(row for row in v['paths'] if row['normalized_path_hex']==sys.argv[2])
+assert row['state_disposition']=='UNATTRIBUTED_CTIME_ONLY_SECURITY_STATE_UNCHANGED'
+assert row['writer_attribution']=='UNATTRIBUTED' and row['content_security_classification']=='REQUIRED_SEPARATELY'
+assert len(row['observed_state_sha256'])==64
+assert v['paths_remain_visible'] is True and v['filesystem_coverage_weakened'] is False and v['decision_eligible'] is False
+PY
+
+# The later visible inventory row is exact currentness, not merely presence.
+# Replacing its hash or inode while recomputing the complete inventory summary
+# must not inherit the signed unchanged-state disposition.
+for spec in 'sha:14:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff' 'inode:11:910';do
+  IFS=: read -r name field replacement <<<"$spec"
+  /usr/bin/python3 - "$TMP/high-candidate.tsv" "$TMP/high-current-$name.tsv" "$config_hex" "$field" "$replacement" <<'PY'
+import hashlib,pathlib,sys
+source,out,path,field,replacement=sys.argv[1:];lines=pathlib.Path(source).read_text().splitlines()
+for index,line in enumerate(lines):
+ values=line.split('\t')
+ if values[0]=='ENTRY' and values[1]==path:values[int(field)]=replacement;lines[index]='\t'.join(values)
+entries=sorted(x for x in lines if x.startswith('ENTRY\t'));digest=hashlib.sha256(''.join(x+'\n' for x in entries).encode()).hexdigest()
+for index,line in enumerate(lines):
+ if line.startswith('SUMMARY\t'):
+  values=line.split('\t');values[10]=digest;lines[index]='\t'.join(values)
+pathlib.Path(out).write_text('\n'.join(lines)+'\n')
+PY
+  expect_fail "high_current_$name" "$TOOL" inventory-create --raw-candidate "$TMP/high-current-$name.tsv" --disposition "$TMP/high-disposition.json" --output "$TMP/high-current-$name.json"
+done
 
 # A third, independently staged ephemeral launcher may consume the resulting
 # disposition with another inode, but only with its own exact cleanup audit.

@@ -9,6 +9,19 @@ PYTHON="$(recovery_trusted_fixed_python)"||fail 'trusted local Python unavailabl
 signed(){ [[ "$1" == /* ]]&&recovery_verify_file "$1" "$1.hmac"; }
 
 case "${1:-}" in
+  create-high-sensitivity-ctime)
+    [[ $# -eq 13&&"${2:-}" == --diagnostic-one&&"${4:-}" == --diagnostic-two&&"${6:-}" == --runtime-provenance&&"${8:-}" == --high-sensitivity-relative-path&&"${10:-}" == --issued-at&&"${12:-}" == --output ]]||fail 'invalid high-sensitivity create invocation'
+    first="$3";second="$5";provenance="$7";high_path="$9";issued="${11}";output="${13}"
+    [[ "$first" == /*&&"$second" == /*&&"$provenance" == /*&&"$high_path" == wp-config.php&&"$output" == /*&&! -e "$output"&&! -L "$output"&&! -e "$output.hmac"&&! -L "$output.hmac" ]]||fail 'invalid high-sensitivity input/output'
+    signed "$first"||fail 'first diagnostic signature invalid';signed "$second"||fail 'second diagnostic signature invalid';signed "$provenance"||fail 'runtime provenance signature invalid'
+    "$ROOT/bin/wapp-signed-drift-diagnostic" verify --artifact "$first" >/dev/null||fail 'first diagnostic invalid'
+    "$ROOT/bin/wapp-signed-drift-diagnostic" verify --artifact "$second" >/dev/null||fail 'second diagnostic invalid'
+    tmp="$(mktemp -d 2>/dev/null||mktemp -d -t wapp-high-sensitivity-ctime)";trap 'rm -rf "$tmp"' EXIT
+    PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$MODEL" create-high-sensitivity-ctime "$first" "$second" "$provenance" "$issued" "$high_path" "$tmp/artifact.json"||fail 'high-sensitivity state disposition derivation failed'
+    recovery_sign_file "$tmp/artifact.json" "$tmp/artifact.json.hmac" >/dev/null||fail 'high-sensitivity disposition signing failed'
+    mv "$tmp/artifact.json" "$output";mv "$tmp/artifact.json.hmac" "$output.hmac";trap - EXIT;rmdir "$tmp"
+    printf 'UNATTRIBUTED_CTIME_ONLY_SECURITY_STATE_DISPOSITION_CREATED: %s\n' "$output"
+    ;;
   create)
     [[ $# -eq 11&&"${2:-}" == --diagnostic-one&&"${4:-}" == --diagnostic-two&&"${6:-}" == --runtime-provenance&&"${8:-}" == --issued-at&&"${10:-}" == --output ]]||fail 'invalid create invocation'
     first="$3";second="$5";provenance="$7";issued="$9";output="${11}"
@@ -52,5 +65,5 @@ case "${1:-}" in
     [[ $count -eq 2 ]]||fail 'volatile inventory dependency cardinality invalid'
     PYTHONDONTWRITEBYTECODE=1 "$PYTHON" "$MODEL" inventory-verify "$artifact"
     ;;
-  *) fail 'usage: wapp-volatile-runtime-disposition create|verify|policy-token|inventory-create|inventory-verify';;
+  *) fail 'usage: wapp-volatile-runtime-disposition create|create-high-sensitivity-ctime|verify|policy-token|inventory-create|inventory-verify';;
 esac
