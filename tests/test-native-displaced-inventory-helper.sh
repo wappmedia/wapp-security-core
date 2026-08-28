@@ -330,6 +330,17 @@ PY
 # closed-world fixture, add one early-sorted bounded drift target, and prove
 # that the released 256 MiB process ceiling can explain the mismatch without
 # copying either complete snapshot or weakening ordinary inventory semantics.
+# The production source must keep the diagnostic budget distinct from the
+# ordinary inventory/rollback budget and bind that selected budget into each
+# diagnostic snapshot summary.
+/usr/bin/python3 - "$SOURCE" <<'PY'
+import pathlib,sys
+source=pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')
+assert '#define WAPP_NATIVE_MAX_SECONDS 900' in source
+assert '#define WAPP_NATIVE_DIAGNOSTIC_MAX_SECONDS 1800' in source
+assert 'max_seconds=(argc>=2&&!strcmp(argv[1],"diagnostic"))?DIAGNOSTIC_MAX_SECONDS:MAX_SECONDS' in source
+assert 'fmt_alloc("SUMMARY' in source and ',max_seconds)' in source
+PY
 printf 'capacity-diagnostic-before\n' >"$CAPACITY_ROOT/a-diagnostic-drift"
 (
   sleep 2
@@ -351,7 +362,7 @@ PY
 # The hard wall-clock boundary must be explicit and distinguishable from an
 # ordinary nonzero helper exit. Build a test-only one-second variant and run it
 # through the same sealed-memfd loader against the already bounded large tree.
-cc -O2 -std=gnu11 -Wall -Wextra -Werror -DWAPP_NATIVE_MAX_SECONDS=1 "$SOURCE" -o "$TMP/timeout-helper"
+cc -O2 -std=gnu11 -Wall -Wextra -Werror -DWAPP_NATIVE_MAX_SECONDS=1 -DWAPP_NATIVE_DIAGNOSTIC_MAX_SECONDS=1 "$SOURCE" -o "$TMP/timeout-helper"
 timeout_sha="$(sha "$TMP/timeout-helper")";timeout_bytes="$(wc -c <"$TMP/timeout-helper"|tr -d ' ')"
 /usr/bin/python3 - "$TMP/timeout-helper" "$TMP/timeout-helper.b64" "$LOADER" "$TMP/timeout-probe" <<'PY'
 import base64,os,pathlib,sys
