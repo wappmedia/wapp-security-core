@@ -247,7 +247,11 @@ for index,line in enumerate(lines):
   fields=line.split('\t');fields[4]=runtime_sha;lines[index]='\t'.join(fields)
 fields=lines[-1].split('\t');fields[4]=metadata;fields[5]=runtime_sha;fields[6]=hashlib.sha256((metadata+'\0'+fields[2]).encode()).hexdigest();lines[-1]='\t'.join(fields);p.write_text('\n'.join(lines)+'\n')
 PY
-expect_fail ephemeral_inventory_reused_runtime "$TOOL" inventory-create --raw-candidate "$TMP/ephemeral-candidate-reused-runtime.tsv" --disposition "$TMP/ephemeral-disposition.json" --output "$TMP/ephemeral-inventory-reused-runtime.json"
+# Exact launcher/helper bytes and metadata can legitimately produce the same
+# runtime identity when an inode is recycled after verified cleanup. The new
+# operation and stage identities above remain the replay boundary.
+"$TOOL" inventory-create --raw-candidate "$TMP/ephemeral-candidate-reused-runtime.tsv" --disposition "$TMP/ephemeral-disposition.json" --output "$TMP/ephemeral-inventory-reused-runtime.json" >/dev/null
+"$TOOL" inventory-verify --artifact "$TMP/ephemeral-inventory-reused-runtime.json"|grep -Fq VERIFIED_NON_AUTHORIZING
 cp "$TMP/ephemeral-candidate.tsv" "$TMP/ephemeral-candidate-runtime-substitution.tsv"
 /usr/bin/python3 - "$TMP/ephemeral-candidate-runtime-substitution.tsv" <<'PY'
 import pathlib,sys

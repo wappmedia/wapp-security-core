@@ -429,7 +429,12 @@ def parse_candidate(path: pathlib.Path, disposition: dict[str, object]) -> tuple
         lifecycle_keys = {"audit_sha256", "launcher_identity_sha256", "operation_id", "runtime_identity_sha256", "stage_identity_sha256"}
         if not isinstance(lifecycles, list) or len(lifecycles) != 2 or any(not isinstance(item, dict) or set(item) != lifecycle_keys for item in lifecycles):
             fail("volatile inventory degraded lifecycle history invalid")
-        if nonce in {str(item["operation_id"]) for item in lifecycles} or audit[7] in {str(item["stage_identity_sha256"]) for item in lifecycles} or expected_runtime_sha in {str(item["runtime_identity_sha256"]) for item in lifecycles}:
+        # Ephemeral staging is operation-scoped. A filesystem may legitimately
+        # recycle the same inode after an exact verified unlink, so identical
+        # release bytes and metadata can reproduce the runtime identity hash.
+        # Replay is bound by the independently fresh operation and staging
+        # identities; bytes/helper/metadata/cleanup remain exact above.
+        if nonce in {str(item["operation_id"]) for item in lifecycles} or audit[7] in {str(item["stage_identity_sha256"]) for item in lifecycles}:
             fail("volatile inventory degraded lifecycle replay")
     elif runtime_contract == "TRUSTED_PERL_SEALED_MEMFD_EXECVEAT_V1":
         if runtime[4] != runtime_identity.get("identity_sha256") or audit is not None:
