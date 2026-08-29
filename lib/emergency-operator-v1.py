@@ -162,6 +162,12 @@ def canonical_digest(value: Any) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def canonical_line_digest(value: Any) -> str:
+    """Digest the signed-artifact canonical form emitted by Private plans."""
+    raw = (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
 def exact_file_manifests(actions: list[dict[str, Any]], orders: list[int], root: str) -> tuple[str, str]:
     target_rows: list[str] = []
     parent_rows: list[str] = []
@@ -838,7 +844,10 @@ def verify_reopen_source_lineage(
         or plan["operation_id"] != remediation["operation_id"] or plan["root"] != remediation["root"]
         or plan["package"] != continuation["remediation_package"] or plan["public_core_commit"] != remediation["product_commit"]
         or not HEX64.fullmatch(string(plan["sites_config_sha256"], "continuation.coherent_plan.sites_config_sha256"))
-        or plan["action_contract_sha256"] != canonical_digest(remediation_value["actions"])
+        or plan["action_contract_sha256"] not in {
+            canonical_digest(remediation_value["actions"]),
+            canonical_line_digest(remediation_value["actions"]),
+        }
         or plan["stages"] != (["PREPARED", "FILES_APPLIED", "DB_APPLIED"] + (["CRON_APPLIED"] if any(action["primitive"] == "REMOVE_EXACT_CRON_EVENT" for action in remediation["actions"]) else []) + ["IDENTITY_APPLIED", "POSTCHECK_VERIFIED"])
         or plan["human_operator_required"] is not True or plan["bounded_consumers_own_exact_mutations"] is not True
         or plan["filesystem_database_acid_claimed"] is not False or plan["scope_expansion_allowed"] is not False

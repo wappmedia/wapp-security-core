@@ -187,7 +187,7 @@ for index,action in enumerate(source['actions'],1):
         dump(binding,{'tool':'synthetic-bounded-dispatch-binding','schema':1,'operation_id':source['operation_id'],'action_order':index,'primitive':action['primitive'],'authority':False})
         orders=[index]
     dispatch.append({'order':len(dispatch)+1,'stage':action['stage'],'consumer':consumer_for[action['primitive']],'action_count':len(orders),'action_orders':orders,'binding':ref(binding)})
-plan={'tool':'wapp-security-human-operator-emergency-coordinator-plan','schema':1,'state':'PREPARED_NO_MUTATION','domain':domain,'operation_id':source['operation_id'],'root':source['site']['root'],'site_identity':{'domain':domain,'wordpress_root':source['site']['root']},'package':ref(package),'private_product_commit':source['product']['commit'],'public_core_commit':source['product']['commit'],'coordinator':ref(os.path.join(run,'launcher')),'sites_config_sha256':'1'*64,'action_contract_sha256':hashlib.sha256(canonical(source['actions'])).hexdigest(),'action_count':len(source['actions']),'dispatch_count':len(dispatch),'dispatch':dispatch,'apply_order':[item['consumer'] for item in dispatch],'rollback_order':[item['consumer'] for item in reversed(dispatch)],'stages':['PREPARED','FILES_APPLIED','DB_APPLIED','IDENTITY_APPLIED','POSTCHECK_VERIFIED'],'human_operator_required':True,'bounded_consumers_own_exact_mutations':True,'filesystem_database_acid_claimed':False,'scope_expansion_allowed':False,'arbitrary_sql_allowed':False,'canonical_ready_claimed':False,'mutation_authority':False}
+plan={'tool':'wapp-security-human-operator-emergency-coordinator-plan','schema':1,'state':'PREPARED_NO_MUTATION','domain':domain,'operation_id':source['operation_id'],'root':source['site']['root'],'site_identity':{'domain':domain,'wordpress_root':source['site']['root']},'package':ref(package),'private_product_commit':source['product']['commit'],'public_core_commit':source['product']['commit'],'coordinator':ref(os.path.join(run,'launcher')),'sites_config_sha256':'1'*64,'action_contract_sha256':hashlib.sha256(canonical(source['actions'])+b'\n').hexdigest(),'action_count':len(source['actions']),'dispatch_count':len(dispatch),'dispatch':dispatch,'apply_order':[item['consumer'] for item in dispatch],'rollback_order':[item['consumer'] for item in reversed(dispatch)],'stages':['PREPARED','FILES_APPLIED','DB_APPLIED','IDENTITY_APPLIED','POSTCHECK_VERIFIED'],'human_operator_required':True,'bounded_consumers_own_exact_mutations':True,'filesystem_database_acid_claimed':False,'scope_expansion_allowed':False,'arbitrary_sql_allowed':False,'canonical_ready_claimed':False,'mutation_authority':False}
 dump(plan_path,plan)
 isolated='/home/user_42/.wapp-security/human-emergency/'+source['operation_id']+'/app_42'
 result_hashes=[];native_receipts=[]
@@ -347,6 +347,15 @@ chmod "$runtime_mode" "$runtime_root"
 build_consumed_reopen_fixture
 expect_fail consumed_remediation_replay python3 "$MODEL" verify-package --package "$package" --domain "$domain" --now-epoch "$now"
 [[ "$(python3 "$MODEL" verify-package --package "$reopen" --domain "$domain" --now-epoch "$now" | python3 -c 'import json,sys;print(json.load(sys.stdin)["human_phrase"])')" == "ÅTERÖPPNA $domain ${reopen_sha:0:12}" ]] || fail reopen_phrase;pass separate_reopen_contract
+python3 - "$MODEL" <<'PY'
+import importlib.util,json,sys
+spec=importlib.util.spec_from_file_location('contract',sys.argv[1]);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+value=[{'order':1,'primitive':'REMOVE_EXACT_OPTION'}]
+assert module.canonical_digest(value) != module.canonical_line_digest(value)
+assert module.canonical_digest(value) == __import__('hashlib').sha256(json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()
+assert module.canonical_line_digest(value) == __import__('hashlib').sha256((json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False)+'\n').encode()).hexdigest()
+PY
+pass reopen_action_contract_digest_forms
 reservation_namespace="$run/consumed/reopen-successors"
 chmod 0777 "$reservation_namespace"
 expect_fail reopen_reservation_writable_parent python3 "$MODEL" verify-package --package "$reopen" --domain "$domain" --now-epoch "$now"
