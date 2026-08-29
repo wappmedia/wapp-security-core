@@ -532,6 +532,45 @@ def trusted_reopen_reservation(
     return path, result
 
 
+def verify_unconsumed_predecessor_reservation_shape(
+    reservation: dict[str, Any], reservation_path: Path, source_marker: Path,
+) -> int:
+    """Accept only the exact historical base or first-successor reservation shape."""
+    schema = integer(
+        reservation.get("schema"),
+        "reopen unconsumed predecessor reservation.schema", minimum=1,
+    )
+    common = {"tool", "schema", "state", "domain", "root", "source_operation_id",
+        "source_package_sha256", "reopen_operation_id", "created_at_epoch",
+        "expires_at_epoch", "reopen_authority_sha256", "source_replay_allowed", "authority"}
+    if schema == 1:
+        exact_keys(reservation, common, "reopen unconsumed predecessor reservation")
+        if reservation_path != source_marker / "reopen-reservation.json":
+            fail("reopen unconsumed predecessor base reservation path mismatch")
+        return schema
+    if schema == 2:
+        exact_keys(reservation, common | {"predecessor"},
+            "reopen unconsumed predecessor reservation")
+        predecessor = reservation["predecessor"]
+        if not isinstance(predecessor, dict):
+            fail("reopen unconsumed predecessor successor predecessor must be an object")
+        exact_keys(predecessor, {"reservation", "package", "review", "consumption_identity",
+            "disposition", "disposition_review"},
+            "reopen unconsumed predecessor successor predecessor")
+        predecessor_reservation = predecessor["reservation"]
+        if not isinstance(predecessor_reservation, dict):
+            fail("reopen unconsumed predecessor successor reservation must be an object")
+        exact_keys(predecessor_reservation, {"path", "sha256"},
+            "reopen unconsumed predecessor successor reservation")
+        if (reservation_path.parent != source_marker / "reopen-successors"
+            or reservation_path.name
+                != digest(predecessor_reservation["sha256"],
+                    "reopen unconsumed predecessor predecessor reservation sha256") + ".json"):
+            fail("reopen unconsumed predecessor successor reservation path mismatch")
+        return schema
+    fail("reopen unconsumed predecessor reservation schema unsupported")
+
+
 def verify_product_seal(path: Path, declared_commit: str, *, current_runtime: bool = True) -> None:
     value = load(path)
     exact_keys(
@@ -1227,12 +1266,10 @@ def verify_reopen_source_lineage(
             or predecessor_continuation.get("execution_audit") != continuation["execution_audit"]
             or predecessor_continuation.get("reopen_reservation") != predecessor["reservation"]):
             fail("reopen unconsumed predecessor package lineage mismatch")
-        exact_keys(predecessor_reservation, {"tool", "schema", "state", "domain", "root",
-            "source_operation_id", "source_package_sha256", "reopen_operation_id", "created_at_epoch",
-            "expires_at_epoch", "reopen_authority_sha256", "source_replay_allowed", "authority",
-            "predecessor"}, "reopen unconsumed predecessor reservation")
+        verify_unconsumed_predecessor_reservation_shape(
+            predecessor_reservation, predecessor_path, source_marker,
+        )
         if (predecessor_reservation["tool"] != "wapp-security-emergency-reopen-reservation"
-            or predecessor_reservation["schema"] != 2
             or predecessor_reservation["state"] != "RESERVED_FOR_DISTINCT_REOPEN"
             or predecessor_reservation["domain"] != domain
             or predecessor_reservation["root"] != site["root"]
