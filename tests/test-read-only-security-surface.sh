@@ -67,7 +67,7 @@ if variant=='incomplete':issues=['UNRESOLVED\tENTRY_OPEN_UNRESOLVED\t'+b'wp-cont
 entries=sorted(entries);inventory=h(('\n'.join(entries)+'\n').encode());directories=1+len(dirs);regular=len(files);hashed_bytes=sum(map(len,files.values()));uploads=sum(b'uploads' in rel.split(b'/') for rel in list(dirs)+list(files))
 rootrow='\t'.join(('ROOT',hx(root),hx(root),str(dev),'100','0755','1000','1000','1','100','101'))
 runtime='\t'.join(('RUNTIME','PRODUCTION_RELEASE_PINNED_NATIVE_LINUX_X86_64_MEMFD_V1',hx(b'memfd:wapp-native-displaced-inventory-linux-x86_64-v1'),helper,h(b'loader=/usr/bin/perl|helper_sha='+helper.encode())))
-summary='\t'.join(('SUMMARY',str(len(entries)),str(directories),str(regular),str(regular),str(hashed_bytes),str(uploads),'0',str(len(issues)),'false' if issues else 'true',inventory,'200000','50000','150000','1073741824','34359738368','64','900','4096','125829120'))
+summary='\t'.join(('SUMMARY',str(len(entries)),str(directories),str(regular),str(regular),str(hashed_bytes),str(uploads),'0',str(len(issues)),'false' if issues else 'true',inventory,'200000','150000','150000','1073741824','34359738368','64','900','4096','125829120'))
 open(out,'w',encoding='ascii').write('\n'.join(sorted([rootrow,runtime,summary,*entries,*issues]))+'\n')
 PY
   sign "$output"
@@ -131,6 +131,18 @@ make_case(){
 }
 
 make_product_seal
+
+# The released cap profile is exact: the superseded 50,000-directory tuple
+# and any caller-widened tuple both fail before surface classification.
+make_rows "$TMP/old-directory-cap.rows" clean
+sed 's/\t200000\t150000\t150000\t/\t200000\t50000\t150000\t/' "$TMP/old-directory-cap.rows" >"$TMP/old-directory-cap.tmp";mv "$TMP/old-directory-cap.tmp" "$TMP/old-directory-cap.rows";sign "$TMP/old-directory-cap.rows"
+make_capture "$TMP/old-directory-cap.rows" "$TMP/old-directory-cap.capture.json"
+expect_fail old_directory_cap "$TOOL" capture-verify --artifact "$TMP/old-directory-cap.capture.json"
+make_rows "$TMP/widened-directory-cap.rows" clean
+sed 's/\t200000\t150000\t150000\t/\t200000\t150001\t150000\t/' "$TMP/widened-directory-cap.rows" >"$TMP/widened-directory-cap.tmp";mv "$TMP/widened-directory-cap.tmp" "$TMP/widened-directory-cap.rows";sign "$TMP/widened-directory-cap.rows"
+make_capture "$TMP/widened-directory-cap.rows" "$TMP/widened-directory-cap.capture.json"
+expect_fail widened_directory_cap "$TOOL" capture-verify --artifact "$TMP/widened-directory-cap.capture.json"
+
 make_case clean clean
 /usr/bin/python3 - "$TMP/clean.surface.json" <<'PY'
 import json,sys

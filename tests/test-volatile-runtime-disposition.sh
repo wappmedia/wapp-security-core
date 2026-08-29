@@ -264,7 +264,7 @@ token_sha="$(sha_text "$policy_value")";log_current_sha="$(sha_text log-current)
   printf 'ENTRY\t%s\t%s\tREGULAR\t77\t0644\t1000\t1000\t300\t301\t11\t202\t1\t-\t%s\t0\n' "$waf_hex" "$abs_waf_hex" "$waf_current_sha"
   printf 'ROOT\t%s\t%s\t11\t22\t0755\t1000\t1000\t1\t1\t1\n' "$root_hex" "$root_hex"
   printf 'RUNTIME\tPRODUCTION_RELEASE_PINNED_NATIVE_LINUX_X86_64_MEMFD_V1\t6d656d66643a776170702d6e61746976652d646973706c616365642d696e76656e746f72792d6c696e75782d7838365f36342d7631\t%s\t%s\n' "$helper_sha" "$runtime_sha"
-  printf 'SUMMARY\t4\t1\t3\t3\t112\t1\t0\t0\ttrue\t%s\t200000\t50000\t150000\t1073741824\t34359738368\t64\t900\t4096\t125829120\n' "$(sha_text inventory-summary)"
+  printf 'SUMMARY\t4\t1\t3\t3\t112\t1\t0\t0\ttrue\t%s\t200000\t150000\t150000\t1073741824\t34359738368\t64\t900\t4096\t125829120\n' "$(sha_text inventory-summary)"
   printf 'VOLATILE_RUNTIME_CANDIDATE\tBOUNDED_VOLATILE_RUNTIME_CANDIDATE_V1\t%s\t2\tVISIBLE\tUNVERIFIED_NON_AUTHORIZING\n' "$token_sha"
   printf 'VOLATILE_RUNTIME_CANDIDATE_PATH\t%s\tAPPEND_PREFIX_VERIFIED_UPLOAD_LOG_GROWTH\tOBSERVED_DRIFT\n' "$log_hex"
   printf 'VOLATILE_RUNTIME_CANDIDATE_PATH\t%s\tCTIME_ONLY\tOBSERVED_DRIFT\n' "$waf_hex"

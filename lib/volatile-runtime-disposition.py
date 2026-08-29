@@ -389,7 +389,7 @@ def parse_candidate(path: pathlib.Path, disposition: dict[str, object]) -> tuple
     expected_runtime_path = b"memfd:wapp-native-displaced-inventory-linux-x86_64-v1".hex()
     if not isinstance(runtime_identity, dict) or runtime[1] != "PRODUCTION_RELEASE_PINNED_NATIVE_LINUX_X86_64_MEMFD_V1" or runtime[2] != expected_runtime_path or runtime[3] != disposition.get("helper_sha256") or not HEX64.fullmatch(runtime[3]) or not HEX64.fullmatch(runtime[4]):
         fail("volatile inventory candidate helper mismatch")
-    expected_caps = ["200000", "50000", "150000", "1073741824", "34359738368", "64", "900", "4096", "125829120"]
+    expected_caps = ["200000", "150000", "150000", "1073741824", "34359738368", "64", "900", "4096", "125829120"]
     if summary[11:] != expected_caps or summary[8] != "0" or summary[9] != "true" or not HEX64.fullmatch(summary[10]):
         fail("volatile inventory candidate coverage incomplete")
     counts = [exact_uint(value, "inventory summary") for value in summary[1:8]]
@@ -399,7 +399,7 @@ def parse_candidate(path: pathlib.Path, disposition: dict[str, object]) -> tuple
     directories = [row for row in entries.values() if row[3] == "DIRECTORY"]
     uploads = [row for row in entries.values() if row[15] == "1"]
     expected_counts = [len(entries), len(directories), len(regular), len(regular), sum(int(row[4]) for row in regular), len(uploads), 0]
-    if counts != expected_counts or counts[0] > 200_000 or counts[1] > 50_000 or counts[2] > 150_000 or counts[4] > 34_359_738_368 or summary[10] != inventory_hash:
+    if counts != expected_counts or counts[0] > 200_000 or counts[1] > 150_000 or counts[2] > 150_000 or counts[4] > 34_359_738_368 or summary[10] != inventory_hash:
         fail("volatile inventory candidate summary derivation mismatch")
     root_entry = entries.get("")
     expected_root_entry_metadata = [root[5], root[6], root[7], root[9], root[10], root[3], root[4], root[8]]

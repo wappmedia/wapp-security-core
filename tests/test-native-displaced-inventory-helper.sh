@@ -300,12 +300,14 @@ assert len(summary)==1
 s=summary[0]
 expected=['100002','1','100001','100001',str(9*1024*1024*1024),'0','0','0','true']
 assert s[1:10]==expected,(s[1:10],expected)
-assert s[11:]==['200000','50000','150000','1073741824','34359738368','64','900','4096','125829120']
+assert s[11:]==['200000','150000','150000','1073741824','34359738368','64','900','4096','125829120']
 entries=[line for line in payload if line.startswith('ENTRY\t')]
 h=hashlib.sha256()
 for line in entries:h.update(line.encode()+b'\n')
 assert h.hexdigest()==s[10]
 source=pathlib.Path(sys.argv[2]).read_text(encoding='utf-8')
+assert 'DIRECTORY_CAP = 150000' in source
+assert 's->dirs_n>DIRECTORY_CAP' in source
 assert 'file_bytes>MAX_TOTAL_BYTES-s->hashed_bytes' in source
 assert 's->hashed_bytes+file_bytes>MAX_TOTAL_BYTES' not in source
 assert 'n>=ENTRY_CAP-s->entries' not in source

@@ -211,7 +211,7 @@ def parse_inventory(raw: bytes) -> dict[str, Any]:
     counts = [len(entries), len(directories), len(regular), len(hashed), sum(entry["size"] for entry in hashed), sum(1 for entry in entries.values() if entry["uploads"]), len(other), len(unresolved)]
     if counts != [int(item) for item in summary[1:9]] or (summary[9] == "true") != (len(unresolved) == 0):
         fail("inventory summary derivation mismatch")
-    if summary[11:] != ["200000", "50000", "150000", "1073741824", "34359738368", "64", "900", "4096", "125829120"]:
+    if summary[11:] != ["200000", "150000", "150000", "1073741824", "34359738368", "64", "900", "4096", "125829120"]:
         fail("inventory cap contract mismatch")
     physical = bytes.fromhex(root[2])
     issue_paths = {row[2] for row in unresolved}

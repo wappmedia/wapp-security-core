@@ -47,7 +47,7 @@ int main(void) {
 
 enum {
     ENTRY_CAP = 200000,
-    DIRECTORY_CAP = 50000,
+    DIRECTORY_CAP = 150000,
     FILE_CAP = 150000,
     DEPTH_CAP = 64,
     MAX_RELATIVE_BYTES = 4096,
@@ -192,7 +192,7 @@ static char *snapshot(const char *root,const char *runtime_sha,const char *runti
   char *roothex=hex_bytes((unsigned char*)root,strlen(root));char ri[65];digest(runtime_identity,strlen(runtime_identity),ri);char *runtimehex=hex_bytes((unsigned char*)RUNTIME_PATH,strlen(RUNTIME_PATH));
   Lines all={0};lines_add(&all,fmt_alloc("ROOT\t%s\t%s\t%llu\t%llu\t%03o\t%u\t%u\t%llu\t%lld\t%lld",roothex,roothex,(unsigned long long)rb.st_dev,(unsigned long long)rb.st_ino,(unsigned)(rb.st_mode&07777),(unsigned)rb.st_uid,(unsigned)rb.st_gid,(unsigned long long)rb.st_nlink,ns_time(rb.st_mtim),ns_time(rb.st_ctim)));lines_add(&all,fmt_alloc("RUNTIME\t%s\t%s\t%s\t%s",RUNTIME_MODE,runtimehex,runtime_sha,ri));
   for(size_t i=0;i<s.rows.n;i++){lines_add(&all,s.rows.v[i]);s.rows.v[i]=NULL;}for(size_t i=0;i<s.issues.n;i++){lines_add(&all,s.issues.v[i]);s.issues.v[i]=NULL;}
-  lines_add(&all,fmt_alloc("SUMMARY\t%zu\t%zu\t%zu\t%zu\t%llu\t%zu\t%zu\t%zu\t%s\t%s\t200000\t50000\t150000\t1073741824\t34359738368\t64\t%u\t4096\t125829120",s.entries,s.dirs_n,s.files,s.hashed,(unsigned long long)s.hashed_bytes,s.uploads,s.other,s.issues.n,(s.issues.n==0&&!s.stopped)?"true":"false",ih,max_seconds));qsort(all.v,all.n,sizeof(char*),cmpstr);
+  lines_add(&all,fmt_alloc("SUMMARY\t%zu\t%zu\t%zu\t%zu\t%llu\t%zu\t%zu\t%zu\t%s\t%s\t200000\t150000\t150000\t1073741824\t34359738368\t64\t%u\t4096\t125829120",s.entries,s.dirs_n,s.files,s.hashed,(unsigned long long)s.hashed_bytes,s.uploads,s.other,s.issues.n,(s.issues.n==0&&!s.stopped)?"true":"false",ih,max_seconds));qsort(all.v,all.n,sizeof(char*),cmpstr);
   size_t total=0;for(size_t i=0;i<all.n;i++)total+=strlen(all.v[i])+1;if(total>MAX_OUTPUT_BYTES)die("final serialized output byte cap exceeded");char *out=xmalloc(total+1),*q=out;for(size_t i=0;i<all.n;i++){size_t n=strlen(all.v[i]);memcpy(q,all.v[i],n);q+=n;*q++='\n';}*q=0;
   free(roothex);free(runtimehex);lines_free(&all);lines_free(&s.rows);lines_free(&s.issues);free(s.dirs.v);return out;
 }

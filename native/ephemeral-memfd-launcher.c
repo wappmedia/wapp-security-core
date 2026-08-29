@@ -20,7 +20,7 @@ int main(void) {
 #else
 
 #define HELPER_BYTES 94328U
-#define HELPER_SHA256 "9deb2acd91ed9ca5bf11b6bbe27cc4c778322dd2ab3e620e4ee9ad9aa5181720"
+#define HELPER_SHA256 "6511e44918f83b498429ff851a933fa2c0e2a25844589b129f8bd783f92c4e8a"
 
 typedef struct { uint32_t h[8]; uint64_t bits; unsigned char block[64]; size_t used; } Sha256;
 static const uint32_t K[64] = {
