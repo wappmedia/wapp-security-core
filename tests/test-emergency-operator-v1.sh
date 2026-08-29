@@ -364,6 +364,8 @@ normal=f'{stamp}\tISOLATION_VERIFIED rebind_sha256={sha} canonical_root_absent=t
 continuation=f'{stamp}\tCONTINUATION_ISOLATION_VERIFIED rebind_sha256={sha} previous_operation={previous} completed_file_replay_forbidden=true canonical_root_absent=true incident_mutation_started=false'
 assert module.execution_audit_isolation_line_matches(normal,ts,operation,['BOUNDED_REMOVE_EXACT_OPTION'])
 assert module.execution_audit_isolation_line_matches(continuation,ts,operation,['BOUNDED_REMOVE_EXACT_OPTION','BOUNDED_REMOVE_EXACT_CRON_EVENT','BOUNDED_IDENTITY_QUARANTINE'])
+assert module.execution_audit_isolation_operation(normal,ts,operation,['BOUNDED_REMOVE_EXACT_OPTION']) == operation
+assert module.execution_audit_isolation_operation(continuation,ts,operation,['BOUNDED_REMOVE_EXACT_OPTION','BOUNDED_REMOVE_EXACT_CRON_EVENT','BOUNDED_IDENTITY_QUARANTINE']) == previous
 assert not module.execution_audit_isolation_line_matches(continuation.replace(previous,operation),ts,operation,['BOUNDED_REMOVE_EXACT_OPTION'])
 assert not module.execution_audit_isolation_line_matches(continuation,ts,operation,['BOUNDED_QUARANTINE_EXACT_FILE'])
 assert not module.execution_audit_isolation_line_matches(continuation.replace('completed_file_replay_forbidden=true ','') ,ts,operation,['BOUNDED_REMOVE_EXACT_OPTION'])

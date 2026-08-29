@@ -792,28 +792,41 @@ def reopen_authority_digest(package: dict[str, Any]) -> str:
     return canonical_digest(committed)
 
 
+def execution_audit_isolation_operation(
+    line: str,
+    timestamp_pattern: str,
+    remediation_operation: str,
+    observed_consumers: list[str],
+) -> str | None:
+    normal = re.compile(
+        rf"{timestamp_pattern}\tISOLATION_VERIFIED rebind_sha256=[0-9a-f]{{64}} "
+        r"canonical_root_absent=true public_origin_denied=true incident_mutation_started=false"
+    )
+    if normal.fullmatch(line) is not None:
+        return remediation_operation
+    continuation = re.compile(
+        rf"{timestamp_pattern}\tCONTINUATION_ISOLATION_VERIFIED rebind_sha256=[0-9a-f]{{64}} "
+        r"previous_operation=([0-9a-f]{32}) completed_file_replay_forbidden=true "
+        r"canonical_root_absent=true incident_mutation_started=false"
+    ).fullmatch(line)
+    if (
+        continuation is not None
+        and continuation.group(1) != remediation_operation
+        and not ({"BOUNDED_QUARANTINE_EXACT_FILE", "BOUNDED_REPLACE_EXACT_FILE"} & set(observed_consumers))
+    ):
+        return continuation.group(1)
+    return None
+
+
 def execution_audit_isolation_line_matches(
     line: str,
     timestamp_pattern: str,
     remediation_operation: str,
     observed_consumers: list[str],
 ) -> bool:
-    normal = re.compile(
-        rf"{timestamp_pattern}\tISOLATION_VERIFIED rebind_sha256=[0-9a-f]{{64}} "
-        r"canonical_root_absent=true public_origin_denied=true incident_mutation_started=false"
-    )
-    if normal.fullmatch(line) is not None:
-        return True
-    continuation = re.compile(
-        rf"{timestamp_pattern}\tCONTINUATION_ISOLATION_VERIFIED rebind_sha256=[0-9a-f]{{64}} "
-        r"previous_operation=([0-9a-f]{32}) completed_file_replay_forbidden=true "
-        r"canonical_root_absent=true incident_mutation_started=false"
-    ).fullmatch(line)
-    return bool(
-        continuation is not None
-        and continuation.group(1) != remediation_operation
-        and not ({"BOUNDED_QUARANTINE_EXACT_FILE", "BOUNDED_REPLACE_EXACT_FILE"} & set(observed_consumers))
-    )
+    return execution_audit_isolation_operation(
+        line, timestamp_pattern, remediation_operation, observed_consumers,
+    ) is not None
 
 
 def verify_reopen_source_lineage(
@@ -943,11 +956,13 @@ def verify_reopen_source_lineage(
     prepared_pattern = re.compile(rf"{ts}\tPREPARED package={re.escape(remediation['package_sha256'])} operation={re.escape(remediation['operation_id'])} plan={re.escape(sha(plan_path))} one_shot_claimed=true incident_mutation_started=false")
     dispatch_patterns = [re.compile(rf"{ts}\tDISPATCH_VERIFIED order={i+1} consumer={re.escape(c)} result_sha256=[0-9a-f]{{64}}") for i,c in enumerate(observed_consumers)]
     postcheck_pattern = re.compile(rf"{ts}\tPOSTCHECK_VERIFIED completed={dispatch_count} isolation_remains=true separate_reopen_authority_required=true")
+    isolation_operation = execution_audit_isolation_operation(
+        audit_lines[1] if len(audit_lines) > 1 else "", ts,
+        remediation["operation_id"], observed_consumers,
+    )
     if (len(audit_lines) != len(dispatch_patterns) + 3
         or prepared_pattern.fullmatch(audit_lines[0]) is None
-        or not execution_audit_isolation_line_matches(
-            audit_lines[1], ts, remediation["operation_id"], observed_consumers,
-        )
+        or isolation_operation is None
         or any(pattern.fullmatch(line) is None for pattern,line in zip(dispatch_patterns, audit_lines[2:-1]))
         or postcheck_pattern.fullmatch(audit_lines[-1]) is None):
         fail("reopen execution audit exact completed lineage mismatch")
@@ -1046,7 +1061,7 @@ def verify_reopen_source_lineage(
             fail("reopen current isolation private parent is group/world writable")
     if (observation["tool"] != "wapp-security-isolated-root-observation" or observation["schema"] != 2
         or observation["state"] != "ISOLATED_EXACT" or observation["domain"] != domain
-        or observation["operation_id"] != remediation["operation_id"] or observation["canonical_root"] != site["root"]
+        or observation["operation_id"] != isolation_operation or observation["canonical_root"] != site["root"]
         or observation["isolated_root"] != reopen_action["target"]["isolated_root"] or observation["canonical_root_present"] is not False
         or observation["isolated_root_present"] is not True or observation["path_chain_no_symlinks"] is not True
         or observation["root"].get("device") != site["root_device"] or observation["root"].get("inode") != site["root_inode"]
