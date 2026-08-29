@@ -356,6 +356,20 @@ assert module.canonical_digest(value) == __import__('hashlib').sha256(json.dumps
 assert module.canonical_line_digest(value) == __import__('hashlib').sha256((json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False)+'\n').encode()).hexdigest()
 PY
 pass reopen_action_contract_digest_forms
+python3 - "$MODEL" <<'PY'
+import importlib.util,sys
+spec=importlib.util.spec_from_file_location('contract',sys.argv[1]);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+ts=r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z';stamp='2026-08-29T05:04:49Z';operation='a'*32;previous='b'*32;sha='3'*64
+normal=f'{stamp}\tISOLATION_VERIFIED rebind_sha256={sha} canonical_root_absent=true public_origin_denied=true incident_mutation_started=false'
+continuation=f'{stamp}\tCONTINUATION_ISOLATION_VERIFIED rebind_sha256={sha} previous_operation={previous} completed_file_replay_forbidden=true canonical_root_absent=true incident_mutation_started=false'
+assert module.execution_audit_isolation_line_matches(normal,ts,operation,['BOUNDED_REMOVE_EXACT_OPTION'])
+assert module.execution_audit_isolation_line_matches(continuation,ts,operation,['BOUNDED_REMOVE_EXACT_OPTION','BOUNDED_REMOVE_EXACT_CRON_EVENT','BOUNDED_IDENTITY_QUARANTINE'])
+assert not module.execution_audit_isolation_line_matches(continuation.replace(previous,operation),ts,operation,['BOUNDED_REMOVE_EXACT_OPTION'])
+assert not module.execution_audit_isolation_line_matches(continuation,ts,operation,['BOUNDED_QUARANTINE_EXACT_FILE'])
+assert not module.execution_audit_isolation_line_matches(continuation.replace('completed_file_replay_forbidden=true ','') ,ts,operation,['BOUNDED_REMOVE_EXACT_OPTION'])
+assert not module.execution_audit_isolation_line_matches(continuation.replace('canonical_root_absent=true','canonical_root_absent=false'),ts,operation,['BOUNDED_REMOVE_EXACT_OPTION'])
+PY
+pass reopen_continuation_isolation_audit_compatibility
 reservation_namespace="$run/consumed/reopen-successors"
 chmod 0777 "$reservation_namespace"
 expect_fail reopen_reservation_writable_parent python3 "$MODEL" verify-package --package "$reopen" --domain "$domain" --now-epoch "$now"

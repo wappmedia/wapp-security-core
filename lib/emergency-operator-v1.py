@@ -792,6 +792,30 @@ def reopen_authority_digest(package: dict[str, Any]) -> str:
     return canonical_digest(committed)
 
 
+def execution_audit_isolation_line_matches(
+    line: str,
+    timestamp_pattern: str,
+    remediation_operation: str,
+    observed_consumers: list[str],
+) -> bool:
+    normal = re.compile(
+        rf"{timestamp_pattern}\tISOLATION_VERIFIED rebind_sha256=[0-9a-f]{{64}} "
+        r"canonical_root_absent=true public_origin_denied=true incident_mutation_started=false"
+    )
+    if normal.fullmatch(line) is not None:
+        return True
+    continuation = re.compile(
+        rf"{timestamp_pattern}\tCONTINUATION_ISOLATION_VERIFIED rebind_sha256=[0-9a-f]{{64}} "
+        r"previous_operation=([0-9a-f]{32}) completed_file_replay_forbidden=true "
+        r"canonical_root_absent=true incident_mutation_started=false"
+    ).fullmatch(line)
+    return bool(
+        continuation is not None
+        and continuation.group(1) != remediation_operation
+        and not ({"BOUNDED_QUARANTINE_EXACT_FILE", "BOUNDED_REPLACE_EXACT_FILE"} & set(observed_consumers))
+    )
+
+
 def verify_reopen_source_lineage(
     continuation: dict[str, Any], domain: str, site: dict[str, Any], reopen_package: dict[str, Any],
     reopen_action: dict[str, Any],
@@ -916,13 +940,16 @@ def verify_reopen_source_lineage(
     audit_path = bound_file(continuation["execution_audit"], "continuation.execution_audit")
     _, audit_lines = bounded_text_lines(audit_path, "continuation execution audit", maximum_bytes=1024 * 1024)
     ts = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z"
-    patterns = [
-        re.compile(rf"{ts}\tPREPARED package={re.escape(remediation['package_sha256'])} operation={re.escape(remediation['operation_id'])} plan={re.escape(sha(plan_path))} one_shot_claimed=true incident_mutation_started=false"),
-        re.compile(rf"{ts}\tISOLATION_VERIFIED rebind_sha256=[0-9a-f]{{64}} canonical_root_absent=true public_origin_denied=true incident_mutation_started=false"),
-        *[re.compile(rf"{ts}\tDISPATCH_VERIFIED order={i+1} consumer={re.escape(c)} result_sha256=[0-9a-f]{{64}}") for i,c in enumerate(observed_consumers)],
-        re.compile(rf"{ts}\tPOSTCHECK_VERIFIED completed={dispatch_count} isolation_remains=true separate_reopen_authority_required=true"),
-    ]
-    if len(audit_lines) != len(patterns) or any(pattern.fullmatch(line) is None for pattern,line in zip(patterns,audit_lines)):
+    prepared_pattern = re.compile(rf"{ts}\tPREPARED package={re.escape(remediation['package_sha256'])} operation={re.escape(remediation['operation_id'])} plan={re.escape(sha(plan_path))} one_shot_claimed=true incident_mutation_started=false")
+    dispatch_patterns = [re.compile(rf"{ts}\tDISPATCH_VERIFIED order={i+1} consumer={re.escape(c)} result_sha256=[0-9a-f]{{64}}") for i,c in enumerate(observed_consumers)]
+    postcheck_pattern = re.compile(rf"{ts}\tPOSTCHECK_VERIFIED completed={dispatch_count} isolation_remains=true separate_reopen_authority_required=true")
+    if (len(audit_lines) != len(dispatch_patterns) + 3
+        or prepared_pattern.fullmatch(audit_lines[0]) is None
+        or not execution_audit_isolation_line_matches(
+            audit_lines[1], ts, remediation["operation_id"], observed_consumers,
+        )
+        or any(pattern.fullmatch(line) is None for pattern,line in zip(dispatch_patterns, audit_lines[2:-1]))
+        or postcheck_pattern.fullmatch(audit_lines[-1]) is None):
         fail("reopen execution audit exact completed lineage mismatch")
     audit_epochs = [reconciliation_timestamp(line.split("\t", 1)[0], "continuation.execution_audit") for line in audit_lines]
     if (audit_epochs != sorted(audit_epochs) or audit_epochs[0] < remediation["generated_at_epoch"]
