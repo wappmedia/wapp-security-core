@@ -357,7 +357,7 @@ assert module.canonical_line_digest(value) == __import__('hashlib').sha256((json
 PY
 pass reopen_action_contract_digest_forms
 python3 - "$MODEL" <<'PY'
-import importlib.util,pathlib,sys
+import importlib.util,json,pathlib,sys
 spec=importlib.util.spec_from_file_location('contract',sys.argv[1]);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
 marker=pathlib.Path('/private/tmp/reopen-shape-fixture/consumed');base=marker/'reopen-reservation.json';sha='3'*64
 common={'tool':'wapp-security-emergency-reopen-reservation','schema':1,'state':'RESERVED_FOR_DISTINCT_REOPEN','domain':'fixture.test','root':'/srv/fixture','source_operation_id':'1'*32,'source_package_sha256':'2'*64,'reopen_operation_id':'4'*32,'created_at_epoch':1,'expires_at_epoch':2,'reopen_authority_sha256':'5'*64,'source_replay_allowed':False,'authority':False}
@@ -365,12 +365,18 @@ assert module.verify_unconsumed_predecessor_reservation_shape(common,base,marker
 predecessor={'reservation':{'path':str(base),'sha256':sha},'package':{'path':'/p','sha256':'6'*64},'review':{'path':'/r','sha256':'7'*64},'consumption_identity':{'path':'/c','sha256':'8'*64},'disposition':{'path':'/d','sha256':'9'*64},'disposition_review':{'path':'/dr','sha256':'a'*64}}
 successor=dict(common,schema=2,predecessor=predecessor);successor_path=marker/'reopen-successors'/(sha+'.json')
 assert module.verify_unconsumed_predecessor_reservation_shape(successor,successor_path,marker)==2
-for value,path in ((common,successor_path),(dict(common,extra=False),base),(dict(common,schema=3),base),(successor,marker/'reopen-successors'/('b'*64+'.json'))):
+schema3_predecessor={key:value for key,value in predecessor.items() if key!='consumption_identity'};schema3_predecessor['registry']={'path':'/registry','sha256':'b'*64}
+schema3=dict(common,schema=3,unconsumed_predecessor=schema3_predecessor);schema3_path=marker/'reopen-successors'/(sha+'.json')
+assert module.verify_unconsumed_predecessor_reservation_shape(schema3,schema3_path,marker)==3
+schema3_extra=dict(schema3,extra=False)
+schema3_nested_extra=json.loads(json.dumps(schema3));schema3_nested_extra['unconsumed_predecessor']['package']['extra']=False
+schema3_relative=json.loads(json.dumps(schema3));schema3_relative['unconsumed_predecessor']['review']['path']='relative/review'
+for value,path in ((common,successor_path),(dict(common,extra=False),base),(dict(common,schema=4),base),(successor,marker/'reopen-successors'/('b'*64+'.json')),(schema3_extra,schema3_path),(schema3_nested_extra,schema3_path),(schema3_relative,schema3_path)):
  try:module.verify_unconsumed_predecessor_reservation_shape(value,path,marker)
  except module.ContractError:continue
  raise AssertionError((value,path))
 PY
-pass reopen_unconsumed_predecessor_schema1_schema2_shape
+pass reopen_unconsumed_predecessor_schema1_schema2_schema3_shape
 python3 - "$MODEL" <<'PY'
 import importlib.util,sys
 spec=importlib.util.spec_from_file_location('contract',sys.argv[1]);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)

@@ -535,7 +535,7 @@ def trusted_reopen_reservation(
 def verify_unconsumed_predecessor_reservation_shape(
     reservation: dict[str, Any], reservation_path: Path, source_marker: Path,
 ) -> int:
-    """Accept only the exact historical base or first-successor reservation shape."""
+    """Accept only an exact historical base or reviewed successor reservation shape."""
     schema = integer(
         reservation.get("schema"),
         "reopen unconsumed predecessor reservation.schema", minimum=1,
@@ -548,20 +548,26 @@ def verify_unconsumed_predecessor_reservation_shape(
         if reservation_path != source_marker / "reopen-reservation.json":
             fail("reopen unconsumed predecessor base reservation path mismatch")
         return schema
-    if schema == 2:
-        exact_keys(reservation, common | {"predecessor"},
+    if schema in (2, 3):
+        predecessor_key = "predecessor" if schema == 2 else "unconsumed_predecessor"
+        exact_keys(reservation, common | {predecessor_key},
             "reopen unconsumed predecessor reservation")
-        predecessor = reservation["predecessor"]
+        predecessor = reservation[predecessor_key]
         if not isinstance(predecessor, dict):
             fail("reopen unconsumed predecessor successor predecessor must be an object")
-        exact_keys(predecessor, {"reservation", "package", "review", "consumption_identity",
-            "disposition", "disposition_review"},
+        predecessor_keys = ({"reservation", "package", "review", "consumption_identity",
+            "disposition", "disposition_review"} if schema == 2 else
+            {"reservation", "package", "review", "registry", "disposition", "disposition_review"})
+        exact_keys(predecessor, predecessor_keys,
             "reopen unconsumed predecessor successor predecessor")
+        for name, value in predecessor.items():
+            if not isinstance(value, dict):
+                fail(f"reopen unconsumed predecessor successor {name} must be an object")
+            exact_keys(value, {"path", "sha256"},
+                f"reopen unconsumed predecessor successor {name}")
+            absolute(value["path"], f"reopen unconsumed predecessor successor {name}.path")
+            digest(value["sha256"], f"reopen unconsumed predecessor successor {name}.sha256")
         predecessor_reservation = predecessor["reservation"]
-        if not isinstance(predecessor_reservation, dict):
-            fail("reopen unconsumed predecessor successor reservation must be an object")
-        exact_keys(predecessor_reservation, {"path", "sha256"},
-            "reopen unconsumed predecessor successor reservation")
         if (reservation_path.parent != source_marker / "reopen-successors"
             or reservation_path.name
                 != digest(predecessor_reservation["sha256"],
