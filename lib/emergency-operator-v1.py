@@ -577,6 +577,15 @@ def verify_unconsumed_predecessor_reservation_shape(
     fail("reopen unconsumed predecessor reservation schema unsupported")
 
 
+def consumed_predecessor_abort_contract(state: Any) -> tuple[str, bool]:
+    """Return the exact abort stage and remote-access bit for a consumed predecessor."""
+    if state == "CONSUMED_PRE_REMOTE_ABORT_VERIFIED_UNMUTATED":
+        return "PRE_REMOTE_SITE_IDENTITY_BINDING", False
+    if state == "CONSUMED_REMOTE_VERIFY_ABORT_VERIFIED_UNMUTATED":
+        return "REMOTE_ISOLATED_PATH_VALIDATION_BEFORE_NODE", True
+    fail("reopen predecessor disposition state unsupported")
+
+
 def verify_product_seal(path: Path, declared_commit: str, *, current_runtime: bool = True) -> None:
     value = load(path)
     exact_keys(
@@ -1161,13 +1170,10 @@ def verify_reopen_source_lineage(
             fail("reopen predecessor package lineage mismatch")
         predecessor_sha = sha(predecessor_package_path)
         predecessor_operation = predecessor_package["operation_id"]
-        exact_keys(predecessor_reservation, {"tool", "schema", "state", "domain", "root",
-            "source_operation_id", "source_package_sha256", "reopen_operation_id", "created_at_epoch",
-            "expires_at_epoch", "reopen_authority_sha256", "source_replay_allowed", "authority"},
-            "reopen predecessor reservation")
+        verify_unconsumed_predecessor_reservation_shape(
+            predecessor_reservation, predecessor_path, source_marker,
+        )
         if (predecessor_reservation["tool"] != "wapp-security-emergency-reopen-reservation"
-            or predecessor_reservation["schema"] != 1
-            or predecessor_path != source_marker / "reopen-reservation.json"
             or predecessor_reservation["state"] != "RESERVED_FOR_DISTINCT_REOPEN"
             or predecessor_reservation["domain"] != domain
             or predecessor_reservation["root"] != site["root"]
@@ -1200,9 +1206,13 @@ def verify_reopen_source_lineage(
             "predecessor_reservation_sha256", "predecessor_consumption_sha256", "abort_stage",
             "remote_access_started", "isolation_activated", "customer_mutation_state", "replay_allowed",
             "supersession_authority", "generated_at_epoch", "authority"}, "reopen predecessor disposition")
+        expected_abort_stage, remote_verify_abort = consumed_predecessor_abort_contract(
+            disposition["state"],
+        )
         if (disposition["tool"] != "wapp-security-emergency-reopen-predecessor-disposition"
             or disposition["schema"] != 1
-            or disposition["state"] != "CONSUMED_PRE_REMOTE_ABORT_VERIFIED_UNMUTATED"
+            or disposition["state"] not in {"CONSUMED_PRE_REMOTE_ABORT_VERIFIED_UNMUTATED",
+                "CONSUMED_REMOTE_VERIFY_ABORT_VERIFIED_UNMUTATED"}
             or disposition["domain"] != domain or disposition["root"] != site["root"]
             or disposition["source_operation_id"] != remediation["operation_id"]
             or disposition["source_package_sha256"] != remediation["package_sha256"]
@@ -1210,8 +1220,8 @@ def verify_reopen_source_lineage(
             or disposition["predecessor_reopen_package_sha256"] != predecessor_sha
             or disposition["predecessor_reservation_sha256"] != predecessor_reservation_sha
             or disposition["predecessor_consumption_sha256"] != sha(predecessor_consumption)
-            or disposition["abort_stage"] != "PRE_REMOTE_SITE_IDENTITY_BINDING"
-            or disposition["remote_access_started"] is not False
+            or disposition["abort_stage"] != expected_abort_stage
+            or disposition["remote_access_started"] is not remote_verify_abort
             or disposition["isolation_activated"] is not False
             or disposition["customer_mutation_state"] != "NONE"
             or disposition["replay_allowed"] is not False

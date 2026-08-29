@@ -380,6 +380,17 @@ pass reopen_unconsumed_predecessor_schema1_schema2_schema3_shape
 python3 - "$MODEL" <<'PY'
 import importlib.util,sys
 spec=importlib.util.spec_from_file_location('contract',sys.argv[1]);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+assert module.consumed_predecessor_abort_contract('CONSUMED_PRE_REMOTE_ABORT_VERIFIED_UNMUTATED') == ('PRE_REMOTE_SITE_IDENTITY_BINDING',False)
+assert module.consumed_predecessor_abort_contract('CONSUMED_REMOTE_VERIFY_ABORT_VERIFIED_UNMUTATED') == ('REMOTE_ISOLATED_PATH_VALIDATION_BEFORE_NODE',True)
+for value in ('REGISTERED_UNCONSUMED_PRECONSUMPTION_ABORT_VERIFIED_UNMUTATED','CONSUMED_REMOTE_VERIFY_ABORT',''):
+ try:module.consumed_predecessor_abort_contract(value)
+ except module.ContractError:continue
+ raise AssertionError(value)
+PY
+pass reopen_consumed_predecessor_abort_contract
+python3 - "$MODEL" <<'PY'
+import importlib.util,sys
+spec=importlib.util.spec_from_file_location('contract',sys.argv[1]);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
 ts=r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z';stamp='2026-08-29T05:04:49Z';operation='a'*32;previous='b'*32;sha='3'*64
 normal=f'{stamp}\tISOLATION_VERIFIED rebind_sha256={sha} canonical_root_absent=true public_origin_denied=true incident_mutation_started=false'
 continuation=f'{stamp}\tCONTINUATION_ISOLATION_VERIFIED rebind_sha256={sha} previous_operation={previous} completed_file_replay_forbidden=true canonical_root_absent=true incident_mutation_started=false'
